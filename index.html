@@ -1690,17 +1690,18 @@ function LiveOrderSorter() {
                       已勾選 {iopenSelected.size} / {customerOrderTotals.length} 位客人
                     </span>
                     <button
-                      onClick={() => {
-                        if (iopenSelected.size === customerOrderTotals.length) {
-                          setIopenSelected(new Set());
-                        } else {
-                          setIopenSelected(new Set(customerOrderTotals.map((c, idx) => iopenKey(c, idx))));
-                        }
-                      }}
+                      onClick={() => setIopenSelected(new Set(customerOrderTotals.map((c, idx) => iopenKey(c, idx))))}
                       className="text-xs px-2.5 py-1 rounded-md font-medium"
                       style={{ border: `1px solid ${COLORS.line}`, color: COLORS.ink }}
                     >
-                      {iopenSelected.size === customerOrderTotals.length ? "取消全選" : "全選"}
+                      全選
+                    </button>
+                    <button
+                      onClick={() => setIopenSelected(new Set())}
+                      className="text-xs px-2.5 py-1 rounded-md font-medium"
+                      style={{ border: `1px solid ${COLORS.line}`, color: COLORS.ink }}
+                    >
+                      全部取消
                     </button>
                   </div>
                   <button onClick={exportIopenXLSX} disabled={iopenSelected.size === 0} className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-md font-medium text-white disabled:opacity-40" style={{ background: COLORS.stamp }}>
