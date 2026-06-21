@@ -588,6 +588,7 @@ function LiveOrderSorter() {
   const [iopenImageUrl, setIopenImageUrl] = useState("");
   const [iopenCategoryCode, setIopenCategoryCode] = useState("209");
   const [iopenShipDays, setIopenShipDays] = useState("3");
+  const [iopenSplitEnabled, setIopenSplitEnabled] = useState(false);
   const [detectInfo, setDetectInfo] = useState({ customers: 0, items: 0, totalQty: 0, warnings: [], kind: "" });
   const [error, setError] = useState("");
 
@@ -948,6 +949,17 @@ function LiveOrderSorter() {
   function iopenKey(c, idx) {
     return c.account || c.name || `row${idx}`;
   }
+  function splitForCoupons(total) {
+    let a = Math.floor(total / 2);
+    let b = total - a;
+    let big = Math.max(a, b);
+    let small = total - big;
+    if (big < 1499) {
+      big = 1499;
+      small = total - 1499;
+    }
+    return [small, big];
+  }
   function exportIopenXLSX() {
     const header = [
       "0", "*溫層設定", "稅別", "*商品名稱", "*商品分類編號", "*商品原始貨號", "商品定價", "*商品售價", "商品成本", "*商品上架",
@@ -961,16 +973,31 @@ function LiveOrderSorter() {
     if (shipDays > 180) shipDays = 180;
     const imageUrl = iopenImageUrl.trim();
     const selected = customerOrderTotals.filter((c, idx) => iopenSelected.has(iopenKey(c, idx)));
-    const rows = selected.map((c, idx) => {
-      const desc = c.items.join("<br>");
+
+    function buildRow(c, sku, mainSku, specName, specValue, price, desc) {
       return [
-        "", 3, 0, c.account || c.name, categoryCode, `LIVE${String(idx + 1).padStart(4, "0")}`,
-        "", c.amount, "", 1,
-        "", "", "", "", "",
+        "", 3, 0, c.account || c.name, categoryCode, sku,
+        "", price, "", 1,
+        mainSku, specName, specValue, "", "",
         imageUrl, "", "", "", "", "", "", "", "", "", "",
         `直播訂單代收 - ${c.name || c.account}`, desc, "", 1, 1, 1, 1,
         1, shipDays,
       ];
+    }
+
+    const rows = [];
+    selected.forEach((c, idx) => {
+      const desc = c.items.join("<br>");
+      const baseSku = `LIVE${String(idx + 1).padStart(4, "0")}`;
+      if (iopenSplitEnabled && c.amount >= 2498) {
+        const [small, big] = splitForCoupons(c.amount);
+        const skuA = `${baseSku}-A`;
+        const skuB = `${baseSku}-B`;
+        rows.push(buildRow(c, skuA, skuA, "金額方案", `$${small}`, small, desc));
+        rows.push(buildRow(c, skuB, skuA, "金額方案", `$${big}`, big, desc));
+      } else {
+        rows.push(buildRow(c, baseSku, "", "", "", c.amount, desc));
+      }
     });
     const wb = XLSX.utils.book_new();
     const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
@@ -1653,6 +1680,10 @@ function LiveOrderSorter() {
                     />
                   </label>
                 </div>
+                <label className="flex items-center gap-2 mb-4 text-xs cursor-pointer" style={{ color: COLORS.ink }}>
+                  <input type="checkbox" checked={iopenSplitEnabled} onChange={(e) => setIopenSplitEnabled(e.target.checked)} />
+                  客人金額滿 $2498（999+1499）自動拆成同一賣場的兩筆金額方案，盡量對半分、並自動調整到都滿足 999／1499 兩張折價券門檻，方便客人分兩次結帳都用得到券
+                </label>
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-sm" style={{ color: COLORS.inkMuted }}>
                     已勾選 {iopenSelected.size} / {customerOrderTotals.length} 位客人
@@ -1713,6 +1744,11 @@ function LiveOrderSorter() {
                             </td>
                             <td className="text-right px-3 py-2.5 font-bold" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
                               {c.amount}
+                              {iopenSplitEnabled && c.amount >= 2498 && (
+                                <div className="text-xs font-normal mt-0.5" style={{ color: COLORS.info }}>
+                                  拆成 {splitForCoupons(c.amount)[0]} / {splitForCoupons(c.amount)[1]}
+                                </div>
+                              )}
                             </td>
                           </tr>
                         );
