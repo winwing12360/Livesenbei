@@ -455,17 +455,18 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
       if(!item)return prev;
       const maxByOrder=item.orderedQty||item.qty||999; // 不可超過客人訂購數量
       const newQty=Math.max(0,Math.min(available+item.allocatedQty,maxByOrder,item.allocatedQty+delta));
-      const newAllocItems=order.allocItems.map(it=>itemKey(it)===sku?{...it,allocatedQty:newQty}:it);
+      const matchSku=(it)=>{const k=itemKey(it);const nk=normalizedKey(it);const fk=flatKey(it);return k===sku||nk===sku||fk===sku||fk===flatKey({product:sku});};
+      const newAllocItems=order.allocItems.map(it=>matchSku(it)?{...it,allocatedQty:newQty}:it);
       // 如果減少了分配量，多出來的就放回waiting
       const diff=item.allocatedQty-newQty;
       let newWaitingItems=[...order.waitingItems];
       if(diff>0){
-        const existing=newWaitingItems.find(it=>itemKey(it)===sku);
-        if(existing)newWaitingItems=newWaitingItems.map(it=>itemKey(it)===sku?{...it,allocatedQty:0,orderedQty:(it.orderedQty||it.qty)+diff}:it);
-        else{const orig=newAllocItems.find(it=>itemKey(it)===sku);newWaitingItems.push({...orig,allocatedQty:0,orderedQty:diff,qty:diff});}
+        const existing=newWaitingItems.find(it=>matchSku(it));
+        if(existing)newWaitingItems=newWaitingItems.map(it=>matchSku(it)?{...it,allocatedQty:0,orderedQty:(it.orderedQty||it.qty)+diff}:it);
+        else{const orig=newAllocItems.find(it=>matchSku(it))||item;newWaitingItems.push({...orig,allocatedQty:0,orderedQty:diff,qty:diff});}
       }else if(diff<0){
         // 從waiting取回
-        newWaitingItems=newWaitingItems.map(it=>{if(itemKey(it)===sku&&(it.orderedQty||it.qty)>0){const take=Math.min(Math.abs(diff),(it.orderedQty||it.qty));return{...it,orderedQty:(it.orderedQty||it.qty)-take};}return it;}).filter(it=>(it.orderedQty||it.qty)>0);
+        newWaitingItems=newWaitingItems.map(it=>{if(matchSku(it)&&(it.orderedQty||it.qty)>0){const take=Math.min(Math.abs(diff),(it.orderedQty||it.qty));return{...it,orderedQty:(it.orderedQty||it.qty)-take};}return it;}).filter(it=>(it.orderedQty||it.qty)>0);
       }
       const next={...prev,[oKey]:{...order,allocItems:newAllocItems,waitingItems:newWaitingItems}};
       onSaveAlloc(next);
