@@ -142,6 +142,7 @@ async function gCreate(token){
 function Setup({onDone}){
   const[tkn,setTkn]=useState("");
   const[gid,setGid]=useState("");
+  const[name,setName]=useState("第一場次");
   const[err,setErr]=useState("");
   const[busy,setBusy]=useState(false);
   const[newId,setNewId]=useState("");
@@ -154,8 +155,7 @@ function Setup({onDone}){
       if(createNew){id=await gCreate(tkn.trim());setNewId(id);}
       await gFetch(tkn.trim(),id);
       localStorage.setItem("st_token",tkn.trim());
-      localStorage.setItem("st_gist_id",id);
-      onDone(tkn.trim(),id);
+      onDone(tkn.trim(),id,name.trim()||"第一場次");
     }catch(e){setErr(e.message);}
     finally{setBusy(false);}
   }
@@ -173,7 +173,10 @@ function Setup({onDone}){
         </div>
         <label style={{color:C.inkMuted}} className="text-xs block mb-1">GitHub Token</label>
         <input type="password" value={tkn} onChange={e=>setTkn(e.target.value)} placeholder="ghp_xxxxxxxxxxxx"
-          className="w-full px-3 py-2 rounded-lg mb-4 text-sm" style={{border:`1px solid ${C.line}`,fontFamily:"monospace"}}/>
+          className="w-full px-3 py-2 rounded-lg mb-3 text-sm" style={{border:`1px solid ${C.line}`,fontFamily:"monospace"}}/>
+        <label style={{color:C.inkMuted}} className="text-xs block mb-1">第一個場次名稱（例如：0622直播）</label>
+        <input type="text" value={name} onChange={e=>setName(e.target.value)} placeholder="第一場次"
+          className="w-full px-3 py-2 rounded-lg mb-4 text-sm" style={{border:`1px solid ${C.line}`}}/>
         {newId&&(
           <div style={{background:C.successSoft,color:C.success,border:`1px solid ${C.success}`,borderRadius:10,padding:12,marginBottom:16,fontSize:12}}>
             ✅ 建立成功！Gist ID：<br/>
@@ -369,9 +372,30 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
 
 // ── Main ──
 function App(){
+  // 多場次：workspaces = [{name, gistId}, ...]
   const[token,setToken]=useState(()=>localStorage.getItem("st_token")||"");
-  const[gistId,setGistId]=useState(()=>localStorage.getItem("st_gist_id")||"");
-  const[setupMode,setSetupMode]=useState(!localStorage.getItem("st_gist_id"));
+  const[workspaces,setWorkspaces]=useState(()=>{
+    const raw=localStorage.getItem("st_workspaces");
+    if(raw){try{return JSON.parse(raw);}catch{}}
+    // 相容舊版單一 Gist
+    const oldGist=localStorage.getItem("st_gist_id");
+    if(oldGist)return[{name:"第一場次",gistId:oldGist}];
+    return[];
+  });
+  const[activeIdx,setActiveIdx]=useState(()=>{
+    const i=parseInt(localStorage.getItem("st_active")||"0",10);
+    return isNaN(i)?0:i;
+  });
+  const gistId=workspaces[activeIdx]?.gistId||"";
+  const[setupMode,setSetupMode]=useState(()=>{
+    const raw=localStorage.getItem("st_workspaces");
+    if(raw){try{const w=JSON.parse(raw);return w.length===0;}catch{}}
+    return!localStorage.getItem("st_gist_id");
+  });
+  const[showWorkspaces,setShowWorkspaces]=useState(false);
+  const[newWsName,setNewWsName]=useState("");
+  const[newWsBusy,setNewWsBusy]=useState(false);
+  const[newWsErr,setNewWsErr]=useState("");
   const[items,setItems]=useState([]);
   const[filter,setFilter]=useState("unordered");
   const[search,setSearch]=useState("");
@@ -412,11 +436,44 @@ function App(){
     });
   }
   // 批次更新同一個 item 多個欄位（避免連續setState覆蓋）
-  function updateItem(id,updates){
-    setItems(prev=>{
-      const next=prev.map(it=>it.id===id?{...it,...updates}:it);
-      scheduleSave(next);return next;
-    });
+  function saveWorkspaces(ws,idx){
+    localStorage.setItem("st_workspaces",JSON.stringify(ws));
+    localStorage.setItem("st_active",String(idx));
+  }
+
+  function switchWorkspace(idx){
+    setActiveIdx(idx);
+    localStorage.setItem("st_active",String(idx));
+    setItems([]);setFilter("unordered");setSearch("");setShowWorkspaces(false);
+    const gid=workspaces[idx]?.gistId;
+    if(gid&&token){
+      setLoading(true);
+      gFetch(token,gid).then(its=>{setItems(its);setLoading(false);})
+        .catch(e=>{setGlobalErr(e.message);setLoading(false);});
+    }
+  }
+
+  async function addWorkspace(){
+    if(!newWsName.trim()){setNewWsErr("請輸入場次名稱");return;}
+    setNewWsErr("");setNewWsBusy(true);
+    try{
+      const id=await gCreate(token);
+      const ws=[...workspaces,{name:newWsName.trim(),gistId:id}];
+      const idx=ws.length-1;
+      setWorkspaces(ws);setActiveIdx(idx);saveWorkspaces(ws,idx);
+      setItems([]);setFilter("unordered");setSearch("");
+      setShowWorkspaces(false);setNewWsName("");
+    }catch(e){setNewWsErr(e.message);}
+    finally{setNewWsBusy(false);}
+  }
+
+  function deleteWorkspace(idx){
+    if(!window.confirm(`確定刪除「${workspaces[idx].name}」？（只刪除本機記錄，Gist 資料不受影響）`))return;
+    const ws=workspaces.filter((_,i)=>i!==idx);
+    const newIdx=Math.min(activeIdx,ws.length-1);
+    setWorkspaces(ws);setActiveIdx(newIdx);saveWorkspaces(ws,newIdx);
+    if(ws.length===0){setSetupMode(true);setShowWorkspaces(false);}
+    else switchWorkspace(newIdx);
   }
 
   function applyBatch(){
@@ -465,11 +522,16 @@ function App(){
 
   function resetSetup(){
     localStorage.removeItem("st_token");localStorage.removeItem("st_gist_id");
-    setToken("");setGistId("");setItems([]);setSetupMode(true);setShowSettings(false);
+    localStorage.removeItem("st_workspaces");localStorage.removeItem("st_active");
+    setToken("");setWorkspaces([]);setActiveIdx(0);setItems([]);setSetupMode(true);setShowSettings(false);setShowWorkspaces(false);
   }
 
-  if(setupMode)return<Setup onDone={(t,g)=>{
-    setToken(t);setGistId(g);setSetupMode(false);
+  if(setupMode)return<Setup onDone={(t,g,name)=>{
+    setToken(t);
+    const ws=[{name:name||"第一場次",gistId:g}];
+    setWorkspaces(ws);setActiveIdx(0);saveWorkspaces(ws,0);
+    localStorage.setItem("st_token",t);
+    setSetupMode(false);
     gFetch(t,g).then(its=>setItems(its)).catch(e=>setGlobalErr(e.message));
   }}/>;
 
@@ -493,7 +555,10 @@ function App(){
         <div style={{maxWidth:640,margin:"0 auto",padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
           <div>
             <div style={{color:C.stamp,fontWeight:700,fontSize:17}}>備貨追蹤</div>
-            <div style={{color:C.inkMuted,fontSize:11}}>到貨狀態管理</div>
+            <button onClick={()=>setShowWorkspaces(!showWorkspaces)}
+              style={{color:C.inkMuted,fontSize:12,background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:3}}>
+              {workspaces[activeIdx]?.name||"場次"} <span style={{fontSize:10}}>▼</span>
+            </button>
           </div>
           <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
             {saving&&<span style={{color:C.inkMuted,fontSize:11}}>儲存中…</span>}
@@ -507,6 +572,44 @@ function App(){
               style={{border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,borderRadius:8,padding:"7px 10px",fontSize:14,cursor:"pointer"}}>⚙</button>
           </div>
         </div>
+
+        {/* 場次切換面板 */}
+        {showWorkspaces&&(
+          <div style={{background:C.surface,borderTop:`1px solid ${C.line}`,padding:"12px 14px"}}>
+            <div style={{maxWidth:640,margin:"0 auto"}}>
+              <div style={{color:C.inkMuted,fontSize:11,marginBottom:8,fontWeight:600}}>切換場次</div>
+              {workspaces.map((ws,i)=>(
+                <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                  <button onClick={()=>switchWorkspace(i)}
+                    style={{flex:1,textAlign:"left",background:i===activeIdx?C.infoSoft:C.stripe,
+                      color:i===activeIdx?C.info:C.ink,border:`1px solid ${i===activeIdx?C.info:C.line}`,
+                      borderRadius:8,padding:"8px 12px",fontSize:13,fontWeight:i===activeIdx?"600":"400",cursor:"pointer"}}>
+                    {i===activeIdx?"▶ ":""}{ws.name}
+                  </button>
+                  {workspaces.length>1&&(
+                    <button onClick={()=>deleteWorkspace(i)}
+                      style={{color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"6px 8px",fontSize:12,cursor:"pointer"}}>刪除</button>
+                  )}
+                </div>
+              ))}
+              <div style={{borderTop:`1px solid ${C.line}`,marginTop:10,paddingTop:10}}>
+                <div style={{color:C.inkMuted,fontSize:11,marginBottom:6,fontWeight:600}}>新增場次</div>
+                <div style={{display:"flex",gap:6}}>
+                  <input type="text" value={newWsName} onChange={e=>setNewWsName(e.target.value)}
+                    placeholder="場次名稱，例如：0630直播"
+                    style={{flex:1,border:`1px solid ${C.line}`,borderRadius:8,padding:"7px 10px",fontSize:13}}/>
+                  <button onClick={addWorkspace} disabled={!newWsName.trim()||newWsBusy}
+                    style={{background:newWsName.trim()&&!newWsBusy?C.stamp:"#ccc",color:"#fff",border:"none",
+                      borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,cursor:newWsName.trim()&&!newWsBusy?"pointer":"default",whiteSpace:"nowrap"}}>
+                    {newWsBusy?"建立中…":"新增"}
+                  </button>
+                </div>
+                {newWsErr&&<div style={{color:C.stamp,fontSize:12,marginTop:4}}>{newWsErr}</div>}
+              </div>
+            </div>
+          </div>
+        )}
+
         {showSettings&&(
           <div style={{background:C.stripe,borderTop:`1px solid ${C.line}`,padding:"10px 14px",fontSize:12,color:C.inkMuted}}>
             <div style={{maxWidth:640,margin:"0 auto",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -514,7 +617,7 @@ function App(){
               <button onClick={()=>{try{navigator.clipboard.writeText(gistId);}catch{}}}
                 style={{border:`1px solid ${C.line}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>複製</button>
               <button onClick={resetSetup}
-                style={{color:C.stamp,border:`1px solid ${C.stamp}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>重置設定</button>
+                style={{color:C.stamp,border:`1px solid ${C.stamp}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>重置所有設定</button>
             </div>
           </div>
         )}
