@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>備貨追蹤｜到貨狀態管理</title>
+<script>
+  window.onerror = function(msg, src, line, col, err) {
+    document.body.innerHTML = '<div style="white-space:pre-wrap;padding:20px;color:#b91c1c;font-family:monospace;font-size:13px;">錯誤：\n' + String(msg) + '\n第 ' + line + ' 行\n' + (err && err.stack ? String(err.stack) : '') + '</div>';
+  };
+</script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "PingFang TC", "Microsoft JhengHei", sans-serif; background: #F5F3EE; }
+  input[type="date"] { -webkit-appearance: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const C = {
+  bg: "#F5F3EE", surface: "#FFFFFF", stamp: "#B44635", ink: "#2D2416",
+  inkMuted: "#7A6E5E", line: "#E5E0D5", stripe: "#FAF8F5",
+  info: "#1D6FA3", infoSoft: "#EFF6FC",
+  success: "#2D7D46", successSoft: "#EBF5EE",
+  warning: "#92400E", warningSoft: "#FFF8ED",
+};
+
+const GIST_FILE = "stock-tracker-data.json";
+
+function genId() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+function itemKey(it) { return [it.product, it.color, it.size, it.style].join("|||"); }
+
+function parseCSVLine(line) {
+  const out = []; let cur = "", q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { if (q && line[i+1] === '"') { cur += '"'; i++; } else q = !q; }
+    else if (ch === ',' && !q) { out.push(cur); cur = ""; }
+    else cur += ch;
+  }
+  out.push(cur); return out;
+}
+
+function parseCSV(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const lines = text.replace(/\r/g, "").split("\n").filter(Boolean);
+  if (lines.length < 2) return [];
+  const header = parseCSVLine(lines[0]).map(h => h.trim());
+  const idx = k => header.findIndex(h => h === k);
+  const [pi, ci, si, sti, qi] = ["商品名稱","顏色","尺寸","款式","數量"].map(idx);
+  return lines.slice(1).map(line => {
+    const cols = parseCSVLine(line).map(c => c.trim());
+    return { product: cols[pi]||"", color: cols[ci]||"", size: cols[si]||"", style: cols[sti]||"", qty: parseInt(cols[qi],10)||0 };
+  }).filter(r => r.product);
+}
+
+async function gistFetch(token, gistId) {
+  const r = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github.v3+json" }
+  });
+  if (!r.ok) throw new Error(`無法讀取 (HTTP ${r.status})，請確認 Token 和 Gist ID 是否正確`);
+  const d = await r.json();
+  const content = d.files[GIST_FILE]?.content;
+  try { return JSON.parse(content || "{}").items || []; } catch { return []; }
+}
+
+async function gistSave(token, gistId, items) {
+  const r = await fetch(`https://api.github.com/gists/${gistId}`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ files: { [GIST_FILE]: { content: JSON.stringify({ items }, null, 2) } } })
+  });
+  if (!r.ok) throw new Error(`儲存失敗 (HTTP ${r.status})`);
+}
+
+async function gistCreate(token) {
+  const r = await fetch("https://api.github.com/gists", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ description: "備貨追蹤資料 - 理貨台", public: false, files: { [GIST_FILE]: { content: JSON.stringify({ items: [] }) } } })
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(()=>({}));
+    throw new Error(`建立失敗 (${r.status})：${e.message || "請確認 Token 是否有 gist 權限"}`);
+  }
+  const d = await r.json(); return d.id;
+}
+
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function isOverdue(dateStr) { return dateStr && !isNaN(new Date(dateStr)) && new Date(dateStr) < new Date(todayStr()); }
+function fmtTime(d) { if (!d) return ""; return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; }
+
+// ───── Setup Screen ─────
+function SetupScreen({ onDone }) {
+  const [tkn, setTkn] = useState("");
+  const [gid, setGid] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [showId, setShowId] = useState("");
+
+  async function handle(createNew) {
+    if (!tkn.trim()) { setErr("請輸入 Token"); return; }
+    if (!createNew && !gid.trim()) { setErr("請輸入 Gist ID"); return; }
+    setErr(""); setBusy(true);
+    try {
+      let id = gid.trim();
+      if (createNew) { id = await gistCreate(tkn.trim()); setShowId(id); }
+      await gistFetch(tkn.trim(), id);
+      localStorage.setItem("st_token", tkn.trim());
+      localStorage.setItem("st_gist_id", id);
+      onDone(tkn.trim(), id);
+    } catch(e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ background: C.bg, minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:"16px" }}>
+      <div style={{ background: C.surface, borderRadius:16, padding:24, maxWidth:480, width:"100%", border:`1px solid ${C.line}` }}>
+        <h1 style={{ color:C.stamp }} className="font-bold text-xl mb-1">備貨追蹤 初次設定</h1>
+        <p style={{ color:C.inkMuted }} className="text-xs mb-5">資料會儲存到你的 GitHub Gist，換裝置、關手機都不會消失</p>
+
+        <div style={{ background:C.infoSoft, color:C.info, border:`1px solid ${C.info}`, borderRadius:10, padding:12, marginBottom:20, fontSize:12, lineHeight:2 }}>
+          <strong>先建立 GitHub 存取金鑰（只要做一次）</strong><br/>
+          1. 打開 github.com → 右上角頭像 → Settings<br/>
+          2. 左側最下方 Developer settings → Personal access tokens → Tokens (classic)<br/>
+          3. Generate new token (classic) → 備註隨便填 → 只勾 <code style={{background:"rgba(0,0,0,0.08)",padding:"1px 4px",borderRadius:3}}>gist</code> → Generate token<br/>
+          4. 複製畫面上的 token（只出現一次！）貼到下方
+        </div>
+
+        <label style={{ color:C.inkMuted }} className="text-xs block mb-1">GitHub Token（以 ghp_ 開頭）</label>
+        <input type="password" value={tkn} onChange={e=>setTkn(e.target.value)} placeholder="ghp_xxxxxxxxxxxx"
+          className="w-full px-3 py-2 rounded-lg mb-4 text-sm" style={{ border:`1px solid ${C.line}`, fontFamily:"monospace" }} />
+
+        {showId && (
+          <div style={{ background:C.successSoft, color:C.success, border:`1px solid ${C.success}`, borderRadius:10, padding:12, marginBottom:16, fontSize:12 }}>
+            ✅ 建立成功！你的 Gist ID 是：<br/>
+            <code style={{ fontSize:11, wordBreak:"break-all", display:"block", marginTop:4, fontWeight:"bold" }}>{showId}</code>
+            <span style={{ color:C.inkMuted, display:"block", marginTop:4 }}>換裝置重新設定時，把這串 ID 貼到「已有 Gist ID」欄位</span>
+          </div>
+        )}
+
+        {err && <div style={{ color:C.stamp, background:"#FEF2F2", border:"1px solid #FCA5A5", borderRadius:8, padding:"8px 12px", marginBottom:12, fontSize:12 }}>{err}</div>}
+
+        <button onClick={()=>handle(true)} disabled={!tkn||busy}
+          style={{ background:C.stamp, opacity:(!tkn||busy)?0.5:1 }}
+          className="w-full text-white font-medium py-2.5 rounded-lg mb-3 text-sm">
+          {busy ? "設定中…" : "🆕 自動建立儲存空間（第一次用）"}
+        </button>
+
+        <div style={{ color:C.inkMuted, textAlign:"center", fontSize:12, marginBottom:12 }}>── 或換裝置重新登入 ──</div>
+
+        <label style={{ color:C.inkMuted }} className="text-xs block mb-1">已有的 Gist ID</label>
+        <input type="text" value={gid} onChange={e=>setGid(e.target.value)} placeholder="貼上之前記下的 Gist ID"
+          className="w-full px-3 py-2 rounded-lg mb-3 text-sm" style={{ border:`1px solid ${C.line}`, fontFamily:"monospace" }} />
+        <button onClick={()=>handle(false)} disabled={!tkn||!gid||busy}
+          style={{ border:`1px solid ${C.line}`, color:C.ink, background:C.surface, opacity:(!tkn||!gid||busy)?0.5:1 }}
+          className="w-full font-medium py-2 rounded-lg text-sm">
+          {busy ? "連線中…" : "使用現有儲存空間"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ───── Main App ─────
+function App() {
+  const [token, setToken] = useState(() => localStorage.getItem("st_token") || "");
+  const [gistId, setGistId] = useState(() => localStorage.getItem("st_gist_id") || "");
+  const [setupMode, setSetupMode] = useState(!localStorage.getItem("st_gist_id"));
+  const [items, setItems] = useState([]);
+  const [filter, setFilter] = useState("all");
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState(null);
+  const [globalErr, setGlobalErr] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+  const fileRef = useRef(null);
+  const saveTimer = useRef(null);
+
+  useEffect(() => {
+    if (!setupMode && token && gistId) {
+      setLoading(true);
+      gistFetch(token, gistId).then(its => { setItems(its); setLoading(false); })
+        .catch(e => { setGlobalErr(e.message); setLoading(false); });
+    }
+  }, []);
+
+  const scheduleSave = useCallback((newItems) => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      setSaving(true);
+      gistSave(token, gistId, newItems)
+        .then(() => { setSaving(false); setLastSaved(new Date()); })
+        .catch(e => { setSaving(false); setGlobalErr("自動儲存失敗：" + e.message); });
+    }, 700);
+  }, [token, gistId]);
+
+  function updateItem(id, field, value) {
+    setItems(prev => {
+      const next = prev.map(it => it.id === id ? { ...it, [field]: value } : it);
+      scheduleSave(next); return next;
+    });
+  }
+
+  function toggleArrived(id, checked) {
+    setItems(prev => {
+      const next = prev.map(it => it.id === id
+        ? { ...it, arrived: checked, arrivedDate: checked ? todayStr() : "" }
+        : it);
+      scheduleSave(next); return next;
+    });
+  }
+
+  function handleCSV(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const parsed = parseCSV(ev.target.result);
+      setItems(prev => {
+        const existing = {};
+        prev.forEach(it => { existing[itemKey(it)] = it; });
+        const merged = parsed.map(p => {
+          const k = itemKey(p);
+          if (existing[k]) return { ...existing[k], qty: p.qty };
+          return { ...p, id: genId(), orderDate: todayStr(), restockDate: "", arrived: false, arrivedDate: "" };
+        });
+        const mergedKeys = new Set(merged.map(itemKey));
+        prev.forEach(it => { if (!mergedKeys.has(itemKey(it))) merged.push(it); });
+        scheduleSave(merged); return merged;
+      });
+    };
+    reader.readAsText(file, "utf-8");
+    e.target.value = "";
+  }
+
+  function resetSetup() {
+    localStorage.removeItem("st_token"); localStorage.removeItem("st_gist_id");
+    setToken(""); setGistId(""); setItems([]); setSetupMode(true); setShowSettings(false);
+  }
+
+  if (setupMode) return <SetupScreen onDone={(t,g) => { setToken(t); setGistId(g); setSetupMode(false);
+    gistFetch(t,g).then(its => setItems(its)).catch(e => setGlobalErr(e.message)); }} />;
+
+  const displayed = items.filter(it => filter === "arrived" ? it.arrived : filter === "pending" ? !it.arrived : true);
+  const arrivedCount = items.filter(it => it.arrived).length;
+  const overdueCount = items.filter(it => it.restockDate && !it.arrived && isOverdue(it.restockDate)).length;
+
+  return (
+    <div style={{ background:C.bg, minHeight:"100vh" }}>
+      {/* Header */}
+      <div style={{ background:C.surface, borderBottom:`1px solid ${C.line}`, position:"sticky", top:0, zIndex:10 }}>
+        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-2">
+          <div>
+            <h1 style={{ color:C.stamp }} className="font-bold text-base leading-tight">備貨追蹤</h1>
+            <p style={{ color:C.inkMuted }} className="text-xs">到貨狀態管理</p>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            {saving && <span style={{ color:C.inkMuted }} className="text-xs whitespace-nowrap">儲存中…</span>}
+            {lastSaved && !saving && <span style={{ color:C.inkMuted }} className="text-xs whitespace-nowrap">已儲存 {fmtTime(lastSaved)}</span>}
+            <button onClick={() => fileRef.current.click()}
+              style={{ background:C.stamp }} className="text-white text-xs px-3 py-1.5 rounded-md font-medium whitespace-nowrap">
+              匯入備貨清單
+            </button>
+            <input ref={fileRef} type="file" accept=".csv" style={{ display:"none" }} onChange={handleCSV} />
+            <button onClick={() => setShowSettings(!showSettings)}
+              style={{ border:`1px solid ${C.line}`, color:C.inkMuted, background:C.surface }}
+              className="text-xs px-2.5 py-1.5 rounded-md">⚙</button>
+          </div>
+        </div>
+        {showSettings && (
+          <div style={{ background:C.stripe, borderTop:`1px solid ${C.line}`, padding:"12px 16px", fontSize:12, color:C.inkMuted }}>
+            <div className="max-w-5xl mx-auto flex items-center gap-3 flex-wrap">
+              <span>Gist ID：<code style={{ fontSize:11, color:C.ink }}>{gistId}</code></span>
+              <button onClick={() => { navigator.clipboard.writeText(gistId); }}
+                style={{ border:`1px solid ${C.line}`, padding:"2px 8px", borderRadius:6 }}>複製 Gist ID</button>
+              <button onClick={resetSetup}
+                style={{ color:C.stamp, border:`1px solid ${C.stamp}`, padding:"2px 8px", borderRadius:6 }}>重置設定</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="max-w-5xl mx-auto px-4 py-4">
+        {globalErr && (
+          <div style={{ background:C.warningSoft, color:C.warning, border:`1px solid ${C.warning}` }} className="rounded-lg px-3 py-2 mb-3 text-xs flex items-center justify-between">
+            <span>{globalErr}</span>
+            <button onClick={() => setGlobalErr("")} className="ml-2 underline">關閉</button>
+          </div>
+        )}
+
+        {/* Stats bar */}
+        <div className="flex items-center gap-3 mb-4 flex-wrap">
+          <span style={{ color:C.ink }} className="text-sm">
+            已到貨 <strong style={{ color:C.success }}>{arrivedCount}</strong> / {items.length} 筆
+          </span>
+          {overdueCount > 0 && (
+            <span style={{ background:C.warningSoft, color:C.warning, border:`1px solid ${C.warning}` }} className="text-xs px-2 py-0.5 rounded-full">
+              ⚠ {overdueCount} 筆補貨日已過
+            </span>
+          )}
+          <div className="flex gap-1 ml-auto">
+            {[["all","全部"],["pending","待到貨"],["arrived","已到貨"]].map(([val, label]) => (
+              <button key={val} onClick={() => setFilter(val)}
+                className="text-xs px-2.5 py-1 rounded-md whitespace-nowrap"
+                style={{ background: filter===val ? C.stamp : C.surface, color: filter===val ? "#fff" : C.inkMuted, border: `1px solid ${filter===val ? C.stamp : C.line}` }}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {loading ? (
+          <div style={{ color:C.inkMuted }} className="text-center py-12 text-sm">讀取中…</div>
+        ) : items.length === 0 ? (
+          <div style={{ color:C.inkMuted, border:`2px dashed ${C.line}` }} className="rounded-xl text-center py-16">
+            <div className="text-3xl mb-3">📦</div>
+            <div className="text-sm font-medium mb-1">還沒有備貨資料</div>
+            <div className="text-xs">點右上角「匯入備貨清單」上傳從理貨台匯出的 CSV</div>
+          </div>
+        ) : displayed.length === 0 ? (
+          <div style={{ color:C.inkMuted, border:`2px dashed ${C.line}` }} className="rounded-xl text-center py-10 text-sm">
+            這個分類目前沒有資料
+          </div>
+        ) : (
+          <div style={{ border:`1px solid ${C.line}` }} className="rounded-xl overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ background:C.stripe, color:C.inkMuted }}>
+                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">商品</th>
+                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">顏色</th>
+                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">尺寸</th>
+                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">款式</th>
+                  <th className="text-right px-3 py-2 font-medium whitespace-nowrap">數量</th>
+                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">訂購日</th>
+                  <th className="text-left px-3 py-2 font-medium whitespace-nowrap">補貨日</th>
+                  <th className="text-center px-3 py-2 font-medium whitespace-nowrap">到貨 ✓</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayed.map((it, idx) => {
+                  const overdue = it.restockDate && !it.arrived && isOverdue(it.restockDate);
+                  return (
+                    <tr key={it.id} style={{
+                      background: it.arrived ? C.successSoft : overdue ? C.warningSoft : (idx%2 ? C.stripe : C.surface),
+                      borderTop: `1px solid ${C.line}`,
+                    }}>
+                      <td className="px-3 py-2 font-medium" style={{ color: it.arrived ? C.success : C.ink, whiteSpace:"nowrap" }}>
+                        {it.arrived && <span className="mr-1">✅</span>}{it.product}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap" style={{ color:C.inkMuted }}>{it.color}</td>
+                      <td className="px-3 py-2 whitespace-nowrap" style={{ color:C.inkMuted }}>{it.size}</td>
+                      <td className="px-3 py-2 whitespace-nowrap" style={{ color:C.inkMuted }}>{it.style}</td>
+                      <td className="px-3 py-2 text-right font-mono whitespace-nowrap">{it.qty}</td>
+                      <td className="px-3 py-2">
+                        <input type="date" value={it.orderDate||""} onChange={e=>updateItem(it.id,"orderDate",e.target.value)}
+                          className="text-xs px-1.5 py-1 rounded" style={{ border:`1px solid ${C.line}`, background:"transparent", color:C.ink, minWidth:110 }} />
+                      </td>
+                      <td className="px-3 py-2">
+                        <input type="date" value={it.restockDate||""} onChange={e=>updateItem(it.id,"restockDate",e.target.value)}
+                          className="text-xs px-1.5 py-1 rounded"
+                          style={{ border:`1px solid ${overdue ? C.stamp : C.line}`, background: overdue ? "#FEF2F2" : "transparent", color: overdue ? C.stamp : C.ink, minWidth:110 }} />
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        <input type="checkbox" checked={!!it.arrived} onChange={e=>toggleArrived(it.id, e.target.checked)}
+                          style={{ width:20, height:20, accentColor:C.success, cursor:"pointer" }} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+try {
+  const root = ReactDOM.createRoot(document.getElementById("root"));
+  root.render(<App />);
+} catch(err) {
+  document.body.innerHTML = '<div style="white-space:pre-wrap;padding:20px;color:#b91c1c;font-family:monospace;font-size:13px;">Render 錯誤：\n' + (err&&err.stack?err.stack:String(err)) + '</div>';
+}
+</script>
+</body>
+</html>
