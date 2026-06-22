@@ -418,7 +418,7 @@ function App(){
         const merged=Object.values(aggMap).map(p=>{
           const k=itemKey(p);
           if(ex[k])return{...ex[k],qty:p.qty};
-          return{...p,id:genId(),importedAt:todayStr(),firstOrderDate:"",secondOrderDate:"",allOrdered:false,orderedQty:p.qty,arrivedQty:0,allArrived:false,arrivedTs:""};
+          return{...p,id:genId(),importedAt:todayStr(),firstOrderDate:todayStr(),secondOrderDate:"",allOrdered:false,orderedQty:p.qty,arrivedQty:0,allArrived:false,arrivedTs:""};
         });
         const mk=new Set(merged.map(itemKey));
         prev.forEach(it=>{if(!mk.has(itemKey(it)))merged.push(it);});
