@@ -450,7 +450,7 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
         shippedAt:null,shippedOrderNo:null,
       }};
       onSaveAlloc(next);
-      onConfirmShipment(oKey,shippedItems);
+      onConfirmShipment(oKey,shippedItems,next); // 明確傳遞最新 alloc，避免閉包舊值
       return next;
     });
     setShipInputs(p=>({...p,[oKey]:""}));
@@ -720,6 +720,7 @@ function App(){
   const[showWorkspaces,setShowWorkspaces]=useState(false);const[newWsName,setNewWsName]=useState("");const[newWsBusy,setNewWsBusy]=useState(false);const[newWsErr,setNewWsErr]=useState("");
   const[items,setItems]=useState([]);
   const[savedAlloc,setSavedAlloc]=useState(null);
+  const savedAllocRef=useRef(null); // 用 ref 避免閉包舊值問題
   const[filter,setFilter]=useState("unordered");const[search,setSearch]=useState("");
   const[loading,setLoading]=useState(false);const[saving,setSaving]=useState(false);const[lastSaved,setLastSaved]=useState(null);const[globalErr,setGlobalErr]=useState("");
   const[showSettings,setShowSettings]=useState(false);
@@ -727,6 +728,7 @@ function App(){
   const[allocMode,setAllocMode]=useState(false);
   const fileRef=useRef(null);const saveTimer=useRef(null);
 
+  useEffect(()=>{savedAllocRef.current=savedAlloc;},[savedAlloc]);
   useEffect(()=>{
     if(!setupMode&&token&&gistId){setLoading(true);gFetch(token,gistId).then(({items:its,savedAlloc:sa})=>{setItems(its);setSavedAlloc(sa);setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});}
   },[]);
@@ -734,10 +736,12 @@ function App(){
   const scheduleSave=useCallback((newItems,newAlloc)=>{
     if(saveTimer.current)clearTimeout(saveTimer.current);
     saveTimer.current=setTimeout(()=>{
+      // 用 ref 讀最新值，避免閉包舊值覆蓋出貨記錄
+      const allocToSave=newAlloc!==undefined?newAlloc:savedAllocRef.current;
       setSaving(true);
-      gSave(token,gistId,newItems,newAlloc!==undefined?newAlloc:savedAlloc).then(()=>{setSaving(false);setLastSaved(new Date());}).catch(e=>{setSaving(false);setGlobalErr("自動儲存失敗："+e.message);});
+      gSave(token,gistId,newItems,allocToSave).then(()=>{setSaving(false);setLastSaved(new Date());}).catch(e=>{setSaving(false);setGlobalErr("自動儲存失敗："+e.message);});
     },800);
-  },[token,gistId,savedAlloc]);
+  },[token,gistId]);
 
   function updateField(id,field,value){setItems(prev=>{const next=prev.map(it=>it.id===id?{...it,[field]:value}:it);scheduleSave(next);return next;});}
 
@@ -836,8 +840,8 @@ function App(){
 
       {allocMode&&<AllocationView items={items} savedAlloc={savedAlloc} onClose={()=>setAllocMode(false)}
         onSaveAlloc={(newAlloc)=>{setSavedAlloc(newAlloc);scheduleSave(items,newAlloc);}}
-        onConfirmShipment={(oKey,shippedItems)=>{
-          // 扣除庫存
+        onConfirmShipment={(oKey,shippedItems,newAlloc)=>{
+          // 扣除庫存，並明確傳遞最新 alloc 避免閉包舊值問題
           setItems(prev=>{
             const next=prev.map(it=>{
               const shipped=shippedItems.find(s=>itemKey(s)===itemKey(it));
@@ -845,7 +849,7 @@ function App(){
               const newShipped=Math.min((it.shippedQty||0)+shipped.allocatedQty,it.arrivedQty||0);
               return{...it,shippedQty:newShipped};
             });
-            scheduleSave(next,savedAlloc);
+            scheduleSave(next,newAlloc);
             return next;
           });
         }}
