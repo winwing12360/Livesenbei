@@ -136,7 +136,54 @@ function computeAlloc(parsed,stockItems){
   return result;
 }
 
-// ── GitHub Gist ──
+// ── 比例分配演算法 ──
+function computeProportionalAlloc(parsed,stockItems){
+  const{customers,orders}=parsed;
+  const stock={};
+  stockItems.forEach(it=>{stock[itemKey(it)]=Math.max(0,(it.arrivedQty||0)-(it.shippedQty||0));});
+  // 計算每個SKU的總訂購量
+  const totalOrdered={};
+  orders.forEach(o=>{o.items.forEach(item=>{const k=itemKey(item);totalOrdered[k]=(totalOrdered[k]||0)+item.qty;});});
+  // 計算每個SKU的到貨比例（上限1）
+  const ratio={};
+  Object.keys(totalOrdered).forEach(k=>{ratio[k]=Math.min(1,(stock[k]||0)/(totalOrdered[k]||1));});
+  // 第一輪：floor分配
+  const orderFloors={};// oKey → {sku → {base, frac, item}}
+  const baseSum={};// sku → 已分配底數總和
+  orders.forEach(o=>{
+    const oKey=makeOrderKey(o.customerKey,o.items);
+    orderFloors[oKey]={};
+    o.items.forEach(item=>{
+      const k=itemKey(item);const r=ratio[k]||0;
+      const exact=item.qty*r;const base=Math.floor(exact);const frac=exact-base;
+      orderFloors[oKey][k]={base,frac,item};
+      baseSum[k]=(baseSum[k]||0)+base;
+    });
+  });
+  // 第二輪：剩餘件數按小數點大小補給
+  Object.keys(totalOrdered).forEach(sku=>{
+    let remaining=(stock[sku]||0)-(baseSum[sku]||0);
+    if(remaining<=0)return;
+    const candidates=[];
+    Object.entries(orderFloors).forEach(([oKey,skuMap])=>{if(skuMap[sku]&&skuMap[sku].frac>0)candidates.push({oKey,frac:skuMap[sku].frac});});
+    candidates.sort((a,b)=>b.frac-a.frac);
+    for(let i=0;i<Math.min(remaining,candidates.length);i++){orderFloors[candidates[i].oKey][sku].base+=1;}
+  });
+  // 組裝結果（依客人金額排序顯示）
+  const sorted=[...orders].sort((a,b)=>(customers[b.customerKey]?.totalAmount||0)-(customers[a.customerKey]?.totalAmount||0));
+  const result={};
+  sorted.forEach(o=>{
+    const oKey=makeOrderKey(o.customerKey,o.items);
+    const allocItems=[],waitingItems=[];
+    o.items.forEach(item=>{
+      const k=itemKey(item);const allocQty=orderFloors[oKey]?.[k]?.base||0;
+      if(allocQty>0)allocItems.push({...item,orderedQty:item.qty,allocatedQty:allocQty});
+      if(allocQty<item.qty)waitingItems.push({...item,orderedQty:item.qty-allocQty,allocatedQty:0,qty:item.qty-allocQty});
+    });
+    result[oKey]={customerAccount:customers[o.customerKey]?.account||o.customerKey,customerName:customers[o.customerKey]?.name||"",orderAmount:o.amount,customerTotalAmount:customers[o.customerKey]?.totalAmount||0,orderIndex:sorted.indexOf(o)+1,allocItems,waitingItems,shippedAt:null,shippedOrderNo:null};
+  });
+  return result;
+}
 async function gFetch(token,gistId){
   const r=await fetch(`https://api.github.com/gists/${gistId}`,{headers:{Authorization:`Bearer ${token}`,Accept:"application/vnd.github.v3+json"}});
   if(!r.ok)throw new Error(`無法讀取 (HTTP ${r.status})`);
@@ -278,11 +325,29 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
 // ── 配貨視圖 ──
 function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}){
   const[editAlloc,setEditAlloc]=useState(savedAlloc||null);
+  const[allocMethod,setAllocMethod]=useState("amount"); // "amount" | "proportional"
+  const[parsedCSV,setParsedCSV]=useState(null); // 暫存解析後的CSV，模式切換時重新計算
   const[fileName,setFileName]=useState("");
   const[err,setErr]=useState("");
   const[editingKey,setEditingKey]=useState(null);
   const[shipInputs,setShipInputs]=useState({});
   const fileRef=useRef(null);
+
+  useEffect(()=>{if(savedAlloc&&!editAlloc){setEditAlloc(savedAlloc);}
+  },[savedAlloc]);
+
+  // 模式切換時重新計算
+  useEffect(()=>{
+    if(!parsedCSV)return;
+    recompute(parsedCSV,allocMethod);
+  },[allocMethod]);
+
+  function recompute(parsed,method){
+    const base=method==="proportional"?computeProportionalAlloc(parsed,items):computeAlloc(parsed,items);
+    // 保留已出貨記錄
+    if(editAlloc){Object.keys(base).forEach(k=>{if(editAlloc[k]?.shippedAt){base[k].shippedAt=editAlloc[k].shippedAt;base[k].shippedOrderNo=editAlloc[k].shippedOrderNo;}});}
+    setEditAlloc(base);onSaveAlloc(base);
+  }
 
   // 計算每個SKU的可用庫存（arrivedQty - shippedQty）
   const stockMap=useMemo(()=>{
@@ -309,15 +374,8 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
       const aoa=text.replace(/\r/g,"").split("\n").filter(Boolean).map(l=>parseLine(l));
       const parsed=parseSenbeiAOA(aoa);
       if(!parsed.orders||!parsed.orders.length){setErr("找不到訂單資料，請確認這是SENBEI匯出的CSV（含M/D開頭的列）");return;}
-      const newAlloc=computeAlloc(parsed,items);
-      // 合併現有出貨記錄（保留已出貨的訂單）
-      if(savedAlloc){
-        Object.keys(newAlloc).forEach(k=>{
-          if(savedAlloc[k]?.shippedAt){newAlloc[k].shippedAt=savedAlloc[k].shippedAt;newAlloc[k].shippedOrderNo=savedAlloc[k].shippedOrderNo;}
-        });
-      }
-      setEditAlloc(newAlloc);
-      onSaveAlloc(newAlloc);
+      setParsedCSV(parsed);
+      recompute(parsed,allocMethod);
     };
     reader.readAsText(f,"utf-8");
     e.target.value="";
@@ -402,10 +460,31 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
   return(
     <div style={{maxWidth:640,margin:"0 auto",padding:"14px 14px"}}>
       <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12}}>
-        <div><div style={{fontWeight:700,fontSize:16,color:C.ink}}>配貨</div><div style={{fontSize:12,color:C.inkMuted}}>依訂單金額高低，自動分配已到貨庫存</div></div>
+        <div>
+          <div style={{fontWeight:700,fontSize:16,color:C.ink}}>配貨</div>
+          <div style={{fontSize:12,color:C.inkMuted}}>自動分配已到貨庫存</div>
+        </div>
         <div style={{display:"flex",gap:6}}>
           {editAlloc&&<button onClick={exportCSV} style={{background:C.info,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:"pointer"}}>匯出清單</button>}
           <button onClick={onClose} style={{color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:8,padding:"7px 12px",fontSize:13,cursor:"pointer"}}>← 返回</button>
+        </div>
+      </div>
+
+      {/* 配貨模式切換 */}
+      <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:12,padding:12,marginBottom:12}}>
+        <div style={{fontSize:12,color:C.inkMuted,marginBottom:8,fontWeight:600}}>配貨模式</div>
+        <div style={{display:"flex",gap:6}}>
+          <button onClick={()=>setAllocMethod("amount")}
+            style={{flex:1,background:allocMethod==="amount"?C.stamp:C.stripe,color:allocMethod==="amount"?"#fff":C.inkMuted,border:`1px solid ${allocMethod==="amount"?C.stamp:C.line}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontWeight:allocMethod==="amount"?"600":"400",cursor:"pointer"}}>
+            💰 金額優先
+          </button>
+          <button onClick={()=>setAllocMethod("proportional")}
+            style={{flex:1,background:allocMethod==="proportional"?C.info:C.stripe,color:allocMethod==="proportional"?"#fff":C.inkMuted,border:`1px solid ${allocMethod==="proportional"?C.info:C.line}`,borderRadius:8,padding:"8px 10px",fontSize:13,fontWeight:allocMethod==="proportional"?"600":"400",cursor:"pointer"}}>
+            ⚖️ 比例分配
+          </button>
+        </div>
+        <div style={{fontSize:11,color:C.inkMuted,marginTop:6}}>
+          {allocMethod==="amount"?"訂單金額越高的客人越先分到庫存":"依到貨比例，每位客人平均分到對應比例的商品"}
         </div>
       </div>
 
@@ -457,28 +536,32 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
                   </div>
                 )}
 
-                {/* 可出貨品項 */}
+                {/* 可出貨/已出貨品項 */}
                 {o.allocItems.filter(it=>it.allocatedQty>0).length>0&&(
                   <div style={{marginBottom:6}}>
-                    <div style={{fontSize:11,color:C.success,fontWeight:700,marginBottom:4}}>✅ 可出貨</div>
+                    <div style={{fontSize:11,color:isShipped?C.info:C.success,fontWeight:700,marginBottom:4}}>
+                      {isShipped?"📦 已出貨":"✅ 可出貨"}
+                    </div>
                     {o.allocItems.filter(it=>it.allocatedQty>0).map((it,i)=>{
                       const sku=itemKey(it);
                       const otherUsage=usage[sku]||0;
                       const available=Math.max(0,(stockMap[sku]||0)-otherUsage);
                       const isEditing=editingKey===o.oKey&&!isShipped;
+                      const itemColor=isShipped?C.info:C.success;
+                      const itemBg=isShipped?C.infoSoft:C.successSoft;
                       return(
-                        <div key={i} style={{background:C.successSoft,borderRadius:8,padding:"6px 10px",marginBottom:4}}>
+                        <div key={i} style={{background:itemBg,borderRadius:8,padding:"6px 10px",marginBottom:4}}>
                           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-                            <span style={{fontSize:13,color:C.success,fontWeight:500,flex:1}}>{[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")}</span>
+                            <span style={{fontSize:13,color:itemColor,fontWeight:500,flex:1}}>{[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")}</span>
                             {isEditing?(
                               <div style={{display:"flex",alignItems:"center",gap:4,flexShrink:0}}>
                                 <button onClick={()=>updateAllocQty(o.oKey,sku,-1)} disabled={it.allocatedQty<=0} style={{width:26,height:26,borderRadius:6,border:`1px solid ${C.line}`,background:"#fff",cursor:it.allocatedQty>0?"pointer":"default",fontSize:16,fontWeight:700,color:C.ink}}>−</button>
-                                <span style={{fontSize:13,fontWeight:700,color:C.success,minWidth:20,textAlign:"center"}}>{it.allocatedQty}</span>
+                                <span style={{fontSize:13,fontWeight:700,color:itemColor,minWidth:20,textAlign:"center"}}>{it.allocatedQty}</span>
                                 <button onClick={()=>updateAllocQty(o.oKey,sku,1)} disabled={it.allocatedQty>=available+it.allocatedQty} style={{width:26,height:26,borderRadius:6,border:`1px solid ${C.line}`,background:"#fff",cursor:it.allocatedQty<available+it.allocatedQty?"pointer":"default",fontSize:16,fontWeight:700,color:C.ink}}>＋</button>
                                 <span style={{fontSize:10,color:C.inkMuted}}>可用{available+it.allocatedQty}</span>
                               </div>
                             ):(
-                              <strong style={{fontSize:13,color:C.success,flexShrink:0}}>× {it.allocatedQty}</strong>
+                              <strong style={{fontSize:13,color:itemColor,flexShrink:0}}>× {it.allocatedQty}</strong>
                             )}
                           </div>
                         </div>
