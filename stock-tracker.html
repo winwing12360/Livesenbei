@@ -371,6 +371,15 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
   }
 
   // 計算每個SKU的可用庫存（arrivedQty - shippedQty）
+  // 不同批次出貨用不同顏色
+  const SHIP_COLORS=[
+    {bg:C.successSoft,color:C.success,border:C.success},      // 第1次：綠
+    {bg:C.infoSoft,color:C.info,border:C.info},               // 第2次：藍
+    {bg:C.orangeSoft,color:C.orange,border:"#FFB74D"},        // 第3次：橙
+    {bg:C.warningSoft,color:C.warning,border:C.warning},      // 第4次：咖
+    {bg:"#F3E8FF",color:"#7C3AED",border:"#A78BFA"},          // 第5次+：紫
+  ];
+  function shipColor(idx){return SHIP_COLORS[Math.min(idx,SHIP_COLORS.length-1)];}
   const stockMap=useMemo(()=>{
     const m={};items.forEach(it=>{m[itemKey(it)]=Math.max(0,(it.arrivedQty||0)-(it.shippedQty||0));});return m;
   },[items]);
@@ -431,11 +440,16 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
   function confirmShipment(oKey,orderNo){
     setEditAlloc(prev=>{
       const order=prev[oKey];
-      const newShipment={orderNo,shippedAt:new Date().toISOString(),items:order.allocItems.filter(it=>it.allocatedQty>0)};
-      const existingShipments=order.shipments||( order.shippedAt?[{orderNo:order.shippedOrderNo,shippedAt:order.shippedAt,items:order.allocItems}]:[] );
-      const next={...prev,[oKey]:{...order,shipments:[...existingShipments,newShipment],shippedAt:null,shippedOrderNo:null}};
+      const shippedItems=order.allocItems.filter(it=>it.allocatedQty>0);
+      const newShipment={orderNo,shippedAt:new Date().toISOString(),items:shippedItems};
+      const existingShipments=order.shipments||(order.shippedAt?[{orderNo:order.shippedOrderNo,shippedAt:order.shippedAt,items:order.allocItems}]:[]);
+      const next={...prev,[oKey]:{...order,
+        allocItems:[],
+        shipments:[...existingShipments,newShipment],
+        shippedAt:null,shippedOrderNo:null,
+      }};
       onSaveAlloc(next);
-      onConfirmShipment(oKey,order.allocItems);
+      onConfirmShipment(oKey,shippedItems);
       return next;
     });
     setShipInputs(p=>({...p,[oKey]:""}));
@@ -527,7 +541,7 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
           <button onClick={()=>fileRef.current.click()} style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"8px 14px",fontSize:13,fontWeight:600,cursor:"pointer"}}>選擇訂單CSV</button>
           {fileName&&<span style={{fontSize:12,color:C.inkMuted}}>{fileName}</span>}
-          {editAlloc&&parsedCSV&&(
+          {editAlloc&&(
             <button onClick={handleRecalculate}
               style={{background:C.surface,color:C.info,border:`1px solid ${C.info}`,borderRadius:8,padding:"8px 12px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               🔄 重新計算配貨
@@ -535,7 +549,7 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
           )}
         </div>
         <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={handleFile}/>
-        {editAlloc&&parsedCSV&&<div style={{fontSize:11,color:C.inkMuted,marginTop:6}}>到貨數量有更新？點「重新計算配貨」把新增庫存自動分配給待補的客人（已出貨的訂單不受影響）</div>}
+        {editAlloc&&<div style={{fontSize:11,color:C.inkMuted,marginTop:6}}>到貨數量更新後點「重新計算配貨」，新增庫存會自動補給待補的客人（已出貨的不受影響）。若跨天重開網頁需重新上傳CSV才能計算。</div>}
         {err&&<div style={{color:C.stamp,fontSize:12,marginTop:8}}>{err}</div>}
       </div>
 
@@ -579,13 +593,16 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
                 )}
 
                 {/* 出貨歷史記錄 */}
-                {shipments.map((s,si)=>(
-                  <div key={si} style={{background:C.infoSoft,border:`1px solid ${C.info}`,borderRadius:8,padding:"7px 10px",marginBottom:6,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                    <span style={{color:C.info,fontWeight:600,fontSize:12}}>📦 第{si+1}次出貨 {fmtTs(s.shippedAt)}</span>
-                    <span style={{color:C.inkMuted,fontFamily:"monospace",fontSize:12}}>{s.orderNo}</span>
-                    <button onClick={()=>{if(window.confirm("確定撤銷這筆出貨記錄？"))revokeShipment(o.oKey,si);}} style={{marginLeft:"auto",color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>撤銷</button>
-                  </div>
-                ))}
+                {shipments.map((s,si)=>{
+                  const sc=shipColor(si);
+                  return(
+                    <div key={si} style={{background:sc.bg,border:`1px solid ${sc.border}`,borderRadius:8,padding:"7px 10px",marginBottom:6,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                      <span style={{color:sc.color,fontWeight:700,fontSize:12}}>📦 第{si+1}批出貨 {fmtTs(s.shippedAt)}</span>
+                      <span style={{color:sc.color,fontFamily:"monospace",fontSize:12,opacity:0.85}}>{s.orderNo}</span>
+                      <button onClick={()=>{if(window.confirm("確定撤銷這筆出貨記錄？"))revokeShipment(o.oKey,si);}} style={{marginLeft:"auto",color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>撤銷</button>
+                    </div>
+                  );
+                })}
 
                 {/* 可出貨/等待出貨品項 */}
                 {o.allocItems.filter(it=>it.allocatedQty>0).length>0&&(
