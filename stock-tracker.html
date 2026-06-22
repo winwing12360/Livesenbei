@@ -184,16 +184,21 @@ function computeAlloc(parsed,stockItems){
   return Object.values(byCustomer).sort((a,b)=>b.totalAmount-a.totalAmount);
 }
 
-// ── GitHub Gist ──
+function makeOrderKey(customerKey,items){
+  return customerKey+"||"+items.map(it=>itemKey(it)+"x"+it.qty).sort().join("|");
+}
 async function gFetch(token,gistId){
   const r=await fetch(`https://api.github.com/gists/${gistId}`,{headers:{Authorization:`Bearer ${token}`,Accept:"application/vnd.github.v3+json"}});
   if(!r.ok)throw new Error(`無法讀取 (HTTP ${r.status})`);
   const d=await r.json();
   const content=d.files[GIST_FILE]?.content;
-  try{return(JSON.parse(content||"{}").items||[]).map(migrateItem);}catch{return[];}
+  try{
+    const parsed=JSON.parse(content||"{}");
+    return{items:(parsed.items||[]).map(migrateItem),shippedOrders:parsed.shippedOrders||{}};
+  }catch{return{items:[],shippedOrders:{}};}
 }
-async function gSave(token,gistId,items){
-  const r=await fetch(`https://api.github.com/gists/${gistId}`,{method:"PATCH",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify({items},null,2)}}})});
+async function gSave(token,gistId,items,shippedOrders){
+  const r=await fetch(`https://api.github.com/gists/${gistId}`,{method:"PATCH",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify({items,shippedOrders},null,2)}}})});
   if(!r.ok)throw new Error(`儲存失敗 (HTTP ${r.status})`);
 }
 async function gCreate(token){
@@ -405,10 +410,11 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
 }
 
 // ── 配貨視圖 ──
-function AllocationView({items,onClose}){
+function AllocationView({items,shippedOrders,onClose,onShip}){
   const[results,setResults]=useState(null);
   const[fileName,setFileName]=useState("");
   const[err,setErr]=useState("");
+  const[shipInputs,setShipInputs]=useState({}); // orderKey → input value
   const fileRef=useRef(null);
 
   function handleFile(e){
@@ -510,41 +516,62 @@ function AllocationView({items,onClose}){
                   <span style={{fontSize:12,fontFamily:"monospace",color:C.inkMuted}}>NT${c.totalAmount.toLocaleString()}</span>
                 </div>
                 {/* 各筆訂單 */}
-                {c.orders.map((o,oi)=>(
-                  <div key={o.orderRef} style={{
-                    borderTop:oi>0?`1px solid ${C.line}`:"none",
-                    paddingTop:oi>0?8:0,
-                    marginTop:oi>0?8:0}}>
-                    {c.orders.length>1&&(
-                      <div style={{fontSize:11,color:C.inkMuted,marginBottom:4,fontWeight:600}}>
-                        訂單 {oi+1}　<span style={{fontFamily:"monospace"}}>NT${o.amount.toLocaleString()}</span>
-                        {o.allocated.length>0&&o.waiting.length===0&&<span style={{color:C.success,marginLeft:6}}>✅ 可全數出貨</span>}
-                        {o.allocated.length>0&&o.waiting.length>0&&<span style={{color:C.orange,marginLeft:6}}>⚡ 部分可出</span>}
-                        {o.allocated.length===0&&<span style={{color:C.inkMuted,marginLeft:6}}>⏳ 全部待補</span>}
-                      </div>
-                    )}
-                    {o.allocated.length>0&&(
-                      <div style={{marginBottom:o.waiting.length>0?6:0}}>
-                        {c.orders.length===1&&<div style={{fontSize:11,color:C.success,fontWeight:700,marginBottom:4}}>✅ 可出貨</div>}
-                        {o.allocated.map((it,i)=>(
-                          <div key={i} style={{fontSize:13,color:C.success,background:C.successSoft,borderRadius:6,padding:"4px 8px",marginBottom:3,fontWeight:500}}>
-                            {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} <strong>× {it.qty}</strong>
+                {c.orders.map((o,oi)=>{
+                  const oKey=makeOrderKey(c.account||c.name,o.items);
+                  const shipped=shippedOrders[oKey];
+                  const canShip=o.allocated.length>0;
+                  return(
+                    <div key={o.orderRef} style={{borderTop:oi>0?`1px solid ${C.line}`:"none",paddingTop:oi>0?8:0,marginTop:oi>0?8:0}}>
+                      {c.orders.length>1&&(
+                        <div style={{fontSize:11,color:C.inkMuted,marginBottom:4,fontWeight:600}}>
+                          訂單 {oi+1}　<span style={{fontFamily:"monospace"}}>NT${o.amount.toLocaleString()}</span>
+                          {shipped?<span style={{color:C.success,marginLeft:6}}>📦 已出貨</span>:o.allocated.length>0&&o.waiting.length===0?<span style={{color:C.success,marginLeft:6}}>✅ 可全數出貨</span>:o.allocated.length>0?<span style={{color:C.orange,marginLeft:6}}>⚡ 部分可出</span>:<span style={{color:C.inkMuted,marginLeft:6}}>⏳ 全部待補</span>}
+                        </div>
+                      )}
+                      {o.allocated.length>0&&(
+                        <div style={{marginBottom:o.waiting.length>0?6:0}}>
+                          {c.orders.length===1&&<div style={{fontSize:11,color:C.success,fontWeight:700,marginBottom:4}}>✅ 可出貨</div>}
+                          {o.allocated.map((it,i)=>(
+                            <div key={i} style={{fontSize:13,color:C.success,background:C.successSoft,borderRadius:6,padding:"4px 8px",marginBottom:3,fontWeight:500}}>
+                              {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} <strong>× {it.qty}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {o.waiting.length>0&&(
+                        <div style={{marginBottom:canShip?8:0}}>
+                          {c.orders.length===1&&<div style={{fontSize:11,color:C.orange,fontWeight:700,marginBottom:4}}>⏳ 待補貨</div>}
+                          {o.waiting.map((it,i)=>(
+                            <div key={i} style={{fontSize:13,color:C.orange,background:C.orangeSoft,borderRadius:6,padding:"4px 8px",marginBottom:3}}>
+                              {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* 出貨單號區塊 */}
+                      {canShip&&(
+                        shipped?(
+                          <div style={{background:C.successSoft,border:`1px solid ${C.success}`,borderRadius:8,padding:"6px 10px",marginTop:6,fontSize:12,display:"flex",alignItems:"center",gap:8}}>
+                            <span style={{color:C.success,fontWeight:600}}>📦 已出貨 {fmtTs(shipped.shippedAt)}</span>
+                            <span style={{color:C.inkMuted,fontFamily:"monospace"}}>{shipped.orderNo}</span>
+                            <button onClick={()=>onShip(oKey,null)} style={{marginLeft:"auto",color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>撤銷</button>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                    {o.waiting.length>0&&(
-                      <div>
-                        {c.orders.length===1&&<div style={{fontSize:11,color:C.orange,fontWeight:700,marginBottom:4}}>⏳ 待補貨</div>}
-                        {o.waiting.map((it,i)=>(
-                          <div key={i} style={{fontSize:13,color:C.orange,background:C.orangeSoft,borderRadius:6,padding:"4px 8px",marginBottom:3}}>
-                            {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                        ):(
+                          <div style={{display:"flex",gap:6,marginTop:6}}>
+                            <input type="text" value={shipInputs[oKey]||""} onChange={e=>setShipInputs(p=>({...p,[oKey]:e.target.value}))}
+                              placeholder="填入出貨單號後按確認出貨"
+                              style={{flex:1,border:`1px solid ${C.line}`,borderRadius:8,padding:"6px 10px",fontSize:13,minWidth:0}}/>
+                            <button onClick={()=>{if(shipInputs[oKey]?.trim())onShip(oKey,shipInputs[oKey].trim());}}
+                              disabled={!shipInputs[oKey]?.trim()}
+                              style={{background:shipInputs[oKey]?.trim()?C.success:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"6px 12px",fontSize:13,fontWeight:600,cursor:shipInputs[oKey]?.trim()?"pointer":"default",whiteSpace:"nowrap"}}>
+                              確認出貨
+                            </button>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                        )
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             );
           })}
@@ -578,6 +605,7 @@ function App(){
   const[newWsErr,setNewWsErr]=useState("");
   // 追蹤
   const[items,setItems]=useState([]);
+  const[shippedOrders,setShippedOrders]=useState({});
   const[filter,setFilter]=useState("unordered");
   const[search,setSearch]=useState("");
   const[loading,setLoading]=useState(false);
@@ -596,17 +624,17 @@ function App(){
   useEffect(()=>{
     if(!setupMode&&token&&gistId){
       setLoading(true);
-      gFetch(token,gistId).then(its=>{setItems(its);setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});
+      gFetch(token,gistId).then(({items:its,shippedOrders:so})=>{setItems(its);setShippedOrders(so||{});setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});
     }
   },[]);
 
-  const scheduleSave=useCallback((newItems)=>{
+  const scheduleSave=useCallback((newItems,newShipped)=>{
     if(saveTimer.current)clearTimeout(saveTimer.current);
     saveTimer.current=setTimeout(()=>{
       setSaving(true);
-      gSave(token,gistId,newItems).then(()=>{setSaving(false);setLastSaved(new Date());}).catch(e=>{setSaving(false);setGlobalErr("自動儲存失敗："+e.message);});
+      gSave(token,gistId,newItems,newShipped||shippedOrders).then(()=>{setSaving(false);setLastSaved(new Date());}).catch(e=>{setSaving(false);setGlobalErr("自動儲存失敗："+e.message);});
     },800);
-  },[token,gistId]);
+  },[token,gistId,shippedOrders]);
 
   function updateField(id,field,value){setItems(prev=>{const next=prev.map(it=>it.id===id?{...it,[field]:value}:it);scheduleSave(next);return next;});}
 
@@ -616,7 +644,7 @@ function App(){
     setActiveIdx(idx);localStorage.setItem("st_active",String(idx));
     setItems([]);setFilter("unordered");setSearch("");setShowWorkspaces(false);setAllocMode(false);
     const gid=workspaces[idx]?.gistId;
-    if(gid&&token){setLoading(true);gFetch(token,gid).then(its=>{setItems(its);setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});}
+    if(gid&&token){setLoading(true);gFetch(token,gid).then(({items:its,shippedOrders:so})=>{setItems(its);setShippedOrders(so||{});setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});}
   }
 
   async function addWorkspace(){
@@ -669,7 +697,7 @@ function App(){
   if(setupMode)return<Setup onDone={(t,g,name)=>{
     setToken(t);const ws=[{name:name||"第一場次",gistId:g}];setWorkspaces(ws);setActiveIdx(0);saveWorkspaces(ws,0);
     localStorage.setItem("st_token",t);setSetupMode(false);
-    gFetch(t,g).then(its=>setItems(its)).catch(e=>setGlobalErr(e.message));
+    gFetch(t,g).then(({items:its,shippedOrders:so})=>{setItems(its);setShippedOrders(so||{});}).catch(e=>setGlobalErr(e.message));
   }}/>;
 
   const displayed=items.filter(it=>{
@@ -752,7 +780,15 @@ function App(){
       </div>
 
       {/* 配貨模式 */}
-      {allocMode&&<AllocationView items={items} onClose={()=>setAllocMode(false)}/>}
+      {allocMode&&<AllocationView items={items} shippedOrders={shippedOrders} onClose={()=>setAllocMode(false)}
+        onShip={(orderKey,orderNo)=>{
+          const next={...shippedOrders};
+          if(orderNo===null){delete next[orderKey];}
+          else{next[orderKey]={orderNo,shippedAt:new Date().toISOString()};}
+          setShippedOrders(next);
+          scheduleSave(items,next);
+        }}
+      />}
 
       {/* 追蹤模式 */}
       {!allocMode&&(
