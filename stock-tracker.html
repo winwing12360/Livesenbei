@@ -330,13 +330,26 @@ function App(){
     setBatchSel(new Set());setBatchDate("");
   }
   function handleCSV(e){
-    const file=e.target.files[0];if(!file)return;
-    const reader=new FileReader();
-    reader.onload=ev=>{
-      const parsed=parseCSV(ev.target.result);
+    const files=Array.from(e.target.files||[]);
+    if(!files.length)return;
+    // 讀取所有檔案，再一起處理
+    Promise.all(files.map(file=>new Promise(resolve=>{
+      const reader=new FileReader();
+      reader.onload=ev=>resolve(parseCSV(ev.target.result));
+      reader.readAsText(file,"utf-8");
+    }))).then(results=>{
+      // 先把所有檔案的品項累加（相同SKU加總數量）
+      const aggMap={};
+      results.forEach(parsed=>{
+        parsed.forEach(p=>{
+          const k=itemKey(p);
+          if(aggMap[k])aggMap[k].qty+=p.qty;
+          else aggMap[k]={...p};
+        });
+      });
       setItems(prev=>{
         const ex={};prev.forEach(it=>{ex[itemKey(it)]=it;});
-        const merged=parsed.map(p=>{
+        const merged=Object.values(aggMap).map(p=>{
           const k=itemKey(p);
           if(ex[k])return{...ex[k],qty:p.qty};
           return{...p,id:genId(),orderDate:todayStr(),supplierOrderDate:"",arrived:false,arrivedTs:""};
@@ -345,8 +358,7 @@ function App(){
         prev.forEach(it=>{if(!mk.has(itemKey(it)))merged.push(it);});
         scheduleSave(merged);return merged;
       });
-    };
-    reader.readAsText(file,"utf-8");
+    });
     e.target.value="";
   }
   function resetSetup(){
@@ -385,7 +397,7 @@ function App(){
               style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
               匯入備貨清單
             </button>
-            <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={handleCSV}/>
+            <input ref={fileRef} type="file" accept=".csv" multiple style={{display:"none"}} onChange={handleCSV}/>
             <button onClick={()=>setShowSettings(!showSettings)}
               style={{border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,borderRadius:8,padding:"7px 10px",fontSize:14,cursor:"pointer"}}>⚙</button>
           </div>
