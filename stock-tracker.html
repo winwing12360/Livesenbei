@@ -418,7 +418,8 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
       const order={...prev[oKey]};
       const item=order.allocItems.find(it=>itemKey(it)===sku);
       if(!item)return prev;
-      const newQty=Math.max(0,Math.min(available+item.allocatedQty,item.allocatedQty+delta));
+      const maxByOrder=item.orderedQty||item.qty||999; // 不可超過客人訂購數量
+      const newQty=Math.max(0,Math.min(available+item.allocatedQty,maxByOrder,item.allocatedQty+delta));
       const newAllocItems=order.allocItems.map(it=>itemKey(it)===sku?{...it,allocatedQty:newQty}:it);
       // 如果減少了分配量，多出來的就放回waiting
       const diff=item.allocatedQty-newQty;
@@ -458,8 +459,18 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
   function revokeShipment(oKey,idx){
     setEditAlloc(prev=>{
       const order=prev[oKey];
-      const shipments=(order.shipments||[]).filter((_,i)=>i!==idx);
-      const next={...prev,[oKey]:{...order,shipments}};
+      const revokedShipment=(order.shipments||[])[idx];
+      const newShipments=(order.shipments||[]).filter((_,i)=>i!==idx);
+      // 把撤銷的品項還回 allocItems
+      const revokedItems=revokedShipment?.items||[];
+      const newAllocItems=[...(order.allocItems||[])];
+      revokedItems.forEach(ri=>{
+        if(!ri.allocatedQty)return;
+        const ex=newAllocItems.find(it=>itemKey(it)===itemKey(ri));
+        if(ex){ex.allocatedQty=(ex.allocatedQty||0)+ri.allocatedQty;}
+        else{newAllocItems.push({...ri});}
+      });
+      const next={...prev,[oKey]:{...order,allocItems:newAllocItems,shipments:newShipments}};
       onSaveAlloc(next);
       return next;
     });
@@ -595,11 +606,19 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
                 {/* 出貨歷史記錄 */}
                 {shipments.map((s,si)=>{
                   const sc=shipColor(si);
+                  const sItems=(s.items||[]).filter(it=>it.allocatedQty>0);
                   return(
-                    <div key={si} style={{background:sc.bg,border:`1px solid ${sc.border}`,borderRadius:8,padding:"7px 10px",marginBottom:6,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
-                      <span style={{color:sc.color,fontWeight:700,fontSize:12}}>📦 第{si+1}批出貨 {fmtTs(s.shippedAt)}</span>
-                      <span style={{color:sc.color,fontFamily:"monospace",fontSize:12,opacity:0.85}}>{s.orderNo}</span>
-                      <button onClick={()=>{if(window.confirm("確定撤銷這筆出貨記錄？"))revokeShipment(o.oKey,si);}} style={{marginLeft:"auto",color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>撤銷</button>
+                    <div key={si} style={{background:sc.bg,border:`1px solid ${sc.border}`,borderRadius:8,padding:"8px 10px",marginBottom:6}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:sItems.length?6:0}}>
+                        <span style={{color:sc.color,fontWeight:700,fontSize:12}}>📦 第{si+1}批出貨 {fmtTs(s.shippedAt)}</span>
+                        <span style={{color:sc.color,fontFamily:"monospace",fontSize:12,opacity:0.85}}>{s.orderNo}</span>
+                        <button onClick={()=>{if(window.confirm("確定撤銷這筆出貨記錄？品項會退回可出貨清單。"))revokeShipment(o.oKey,si);}} style={{marginLeft:"auto",color:sc.color,border:`1px solid ${sc.border}`,background:C.surface,borderRadius:6,padding:"2px 8px",fontSize:11,cursor:"pointer"}}>撤銷</button>
+                      </div>
+                      {sItems.map((it,ii)=>(
+                        <div key={ii} style={{fontSize:12,color:sc.color,paddingLeft:4,lineHeight:1.8}}>
+                          {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.allocatedQty}
+                        </div>
+                      ))}
                     </div>
                   );
                 })}
