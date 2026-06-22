@@ -218,12 +218,16 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
   function handleArrivedQty(val){
     const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;
     const n=Math.max(0,parseInt(val,10)||0);
+    const wasZero=!it.arrivedQty||it.arrivedQty===0;
     const nowFull=n>=maxQ;
-    onUpdate("arrivedQty",n);
+    const updates={arrivedQty:n};
+    if(n>0&&wasZero&&!it.firstArrivedTs)updates.firstArrivedTs=new Date().toISOString();
+    if(n===0)updates.firstArrivedTs="";
     if(nowFull&&!it.allArrived){
-      onUpdate("allArrived",true);
-      if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());
+      updates.allArrived=true;
+      if(!it.arrivedTs)updates.arrivedTs=new Date().toISOString();
     }
+    Object.keys(updates).forEach(k=>onUpdate(k,updates[k]));
   }
   function handleAllArrived(checked){
     const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;
@@ -231,6 +235,7 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
     if(checked){
       if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());
       if(!it.arrivedQty||it.arrivedQty<maxQ)onUpdate("arrivedQty",maxQ);
+      if(!it.firstArrivedTs)onUpdate("firstArrivedTs",new Date().toISOString());
     }else{
       onUpdate("arrivedTs","");
     }
@@ -347,8 +352,14 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
           )}
         </div>
         {it.arrivedQty>0&&!it.allArrived&&(
-          <div style={{color:C.orange,fontSize:11,marginTop:4}}>
-            ⚡ 部分到貨：{it.arrivedQty}/{it.orderedQty!=null?it.orderedQty:it.qty} 件
+          <div style={{color:C.orange,fontSize:11,marginTop:4,display:"flex",alignItems:"center",gap:6}}>
+            <span>⚡ 部分到貨：{it.arrivedQty}/{it.orderedQty!=null?it.orderedQty:it.qty} 件</span>
+            {it.firstArrivedTs&&<span style={{color:C.inkMuted}}>首次到貨 {fmtTs(it.firstArrivedTs)}</span>}
+          </div>
+        )}
+        {it.allArrived&&it.firstArrivedTs&&it.arrivedTs&&it.firstArrivedTs!==it.arrivedTs&&(
+          <div style={{color:C.inkMuted,fontSize:11,marginTop:4}}>
+            首次到貨 {fmtTs(it.firstArrivedTs)}　全數到貨 {fmtTs(it.arrivedTs)}
           </div>
         )}
       </div>
