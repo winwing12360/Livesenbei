@@ -40,7 +40,27 @@ function fmtArrivedTs(ts){
   const d=new Date(ts);
   return`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
 }
-function isOverdue(s){return s&&!isNaN(new Date(s))&&new Date(s)<new Date(todayStr());}
+function daysSince(dateStr){
+  if(!dateStr||isNaN(new Date(dateStr)))return null;
+  return Math.floor((new Date(todayStr())-new Date(dateStr))/(1000*60*60*24));
+}
+function isLateOrder(it){
+  // 超過3天還沒填訂貨日
+  if(it.arrived||it.supplierOrderDate)return false;
+  const d=daysSince(it.orderDate);
+  return d!==null&&d>3;
+}
+function isLateArrival(it){
+  // 訂貨後超過14天還沒到貨
+  if(it.arrived||!it.supplierOrderDate)return false;
+  const d=daysSince(it.supplierOrderDate);
+  return d!==null&&d>14;
+}
+function sortPriority(it){
+  if(it.arrived)return 3;
+  if(it.supplierOrderDate)return 2;
+  return 1;
+}
 
 function parseLine(line){
   const out=[];let cur="",q=false;
@@ -162,17 +182,43 @@ function Setup({onDone}){
 
 // ── Item Card ──
 function ItemCard({it,sel,onToggleSel,onUpdate,onToggleArrived}){
-  const overdue=it.supplierOrderDate&&!it.arrived&&isOverdue(it.supplierOrderDate);
+  const lateOrder=isLateOrder(it);
+  const lateArrival=isLateArrival(it);
+  const daysNoOrder=lateOrder?daysSince(it.orderDate):null;
+  const daysNoArrival=lateArrival?daysSince(it.supplierOrderDate):null;
+
+  let cardBorder=C.line;
+  let cardBg=C.surface;
+  if(it.arrived){cardBg=C.successSoft;}
+  else if(lateArrival){cardBorder=C.warning;cardBg=C.warningSoft;}
+  else if(lateOrder){cardBorder="#FFB74D";cardBg:"#FFF8F0";}
+  else if(sel){cardBorder=C.info;}
+
   return(
     <div style={{
-      background:it.arrived?C.successSoft:C.surface,
-      border:`1px solid ${sel?"#1D6FA3":overdue?C.stamp:C.line}`,
+      background:cardBg,
+      border:`1px solid ${sel&&!it.arrived?C.info:cardBorder}`,
       borderRadius:12,
       marginBottom:10,
       padding:"12px 14px",
-      opacity:it.arrived?0.85:1,
-      boxShadow:sel?"0 0 0 2px rgba(29,111,163,0.2)":overdue?"0 0 0 2px rgba(180,70,53,0.15)":"none",
+      opacity:it.arrived?0.8:1,
+      boxShadow:sel?"0 0 0 2px rgba(29,111,163,0.2)":lateArrival?"0 0 0 2px rgba(146,64,14,0.15)":lateOrder?"0 0 0 2px rgba(255,183,77,0.2)":"none",
     }}>
+      {/* 警示徽章 */}
+      {(lateOrder||lateArrival)&&(
+        <div style={{marginBottom:8,display:"flex",gap:6,flexWrap:"wrap"}}>
+          {lateOrder&&(
+            <span style={{background:"#FFF3E0",color:"#E65100",border:"1px solid #FFB74D",borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>
+              ⚠ {daysNoOrder}天未訂貨
+            </span>
+          )}
+          {lateArrival&&(
+            <span style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>
+              🚨 {daysNoArrival}天未到貨
+            </span>
+          )}
+        </div>
+      )}
       {/* 上排：勾選 + 商品名稱 + 數量 */}
       <div className="flex items-start gap-3 mb-2">
         <input type="checkbox" checked={sel} onChange={onToggleSel}
@@ -202,11 +248,11 @@ function ItemCard({it,sel,onToggleSel,onUpdate,onToggleArrived}){
             style={{width:"100%",border:`1px solid ${C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:C.ink,background:C.bg}}/>
         </div>
         <div className="flex-1">
-          <div style={{color:overdue?C.stamp:C.inkMuted,fontSize:11,marginBottom:3,fontWeight:overdue?"600":"400"}}>
-            訂貨日{overdue?" ⚠":""}
+          <div style={{color:lateArrival?C.warning:C.inkMuted,fontSize:11,marginBottom:3,fontWeight:lateArrival?"600":"400"}}>
+            訂貨日{lateArrival?" 🚨":""}
           </div>
           <input type="date" value={it.supplierOrderDate||""} onChange={e=>onUpdate("supplierOrderDate",e.target.value)}
-            style={{width:"100%",border:`1px solid ${overdue?C.stamp:C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:overdue?C.stamp:C.ink,background:overdue?"#FEF2F2":C.bg}}/>
+            style={{width:"100%",border:`1px solid ${lateArrival?C.warning:C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:lateArrival?C.warning:C.ink,background:lateArrival?C.warningSoft:C.bg}}/>
         </div>
       </div>
 
@@ -317,9 +363,10 @@ function App(){
     const matchFilter=filter==="arrived"?it.arrived:filter==="pending"?!it.arrived:true;
     const matchSearch=!search.trim()||it.product.includes(search.trim());
     return matchFilter&&matchSearch;
-  });
+  }).slice().sort((a,b)=>sortPriority(a)-sortPriority(b));
   const arrivedCount=items.filter(it=>it.arrived).length;
-  const overdueCount=items.filter(it=>it.supplierOrderDate&&!it.arrived&&isOverdue(it.supplierOrderDate)).length;
+  const lateOrderCount=items.filter(isLateOrder).length;
+  const lateArrivalCount=items.filter(isLateArrival).length;
   const allSel=displayed.length>0&&displayed.every(it=>batchSel.has(it.id));
 
   return(
@@ -369,9 +416,14 @@ function App(){
           <span style={{color:C.ink,fontSize:14}}>
             已到貨 <strong style={{color:C.success}}>{arrivedCount}</strong> / {items.length} 筆
           </span>
-          {overdueCount>0&&(
+          {lateOrderCount>0&&(
+            <span style={{background:"#FFF3E0",color:"#E65100",border:"1px solid #FFB74D",borderRadius:20,padding:"2px 10px",fontSize:12}}>
+              ⚠ {lateOrderCount} 筆逾3天未訂貨
+            </span>
+          )}
+          {lateArrivalCount>0&&(
             <span style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:20,padding:"2px 10px",fontSize:12}}>
-              ⚠ {overdueCount} 筆訂貨日已過
+              🚨 {lateArrivalCount} 筆逾14天未到貨
             </span>
           )}
           <div style={{display:"flex",gap:4,marginLeft:"auto"}}>
@@ -446,12 +498,24 @@ function App(){
             這個分類目前沒有資料
           </div>
         ):(
-          displayed.map(it=>(
-            <ItemCard key={it.id} it={it} sel={batchSel.has(it.id)}
-              onToggleSel={()=>toggleSel(it.id)}
-              onUpdate={(field,val)=>update(it.id,field,val)}
-              onToggleArrived={checked=>toggleArrived(it.id,checked)}/>
-          ))
+          displayed.map((it,idx)=>{
+            const prev=displayed[idx-1];
+            const showDivider=idx===0||(prev&&sortPriority(prev)!==sortPriority(it));
+            const groupLabel=sortPriority(it)===1?"📋 未訂貨":sortPriority(it)===2?"🚚 已訂貨，待到貨":"✅ 已到貨";
+            return(
+              <React.Fragment key={it.id}>
+                {showDivider&&(
+                  <div style={{color:C.inkMuted,fontSize:12,fontWeight:600,padding:"4px 2px 8px",marginTop:idx===0?0:8}}>
+                    {groupLabel}
+                  </div>
+                )}
+                <ItemCard it={it} sel={batchSel.has(it.id)}
+                  onToggleSel={()=>toggleSel(it.id)}
+                  onUpdate={(field,val)=>update(it.id,field,val)}
+                  onToggleArrived={checked=>toggleArrived(it.id,checked)}/>
+              </React.Fragment>
+            );
+          })
         )}
       </div>
     </div>
