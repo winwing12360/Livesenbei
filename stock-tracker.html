@@ -115,9 +115,12 @@ function parseSenbeiAOA(aoa){
   }
   mCols=mCols||{account:1,name:2,amount:-1};
   dCols=dCols||{product:1,qty:3,spec:4};
-  const customers={};
-  let cur=null;
-  aoa.forEach(r=>{
+
+  const customers={};  // customerKey → {account, name, totalAmount}
+  const orders=[];     // [{orderRef, customerKey, amount, items:[]}]
+  let curOrder=null;
+
+  aoa.forEach((r,rowIdx)=>{
     const c0=normalizeStr(String(r?.[0]??""));
     if(c0==="M"){
       const acc=normalizeStr(r[mCols.account]||"");
@@ -125,10 +128,11 @@ function parseSenbeiAOA(aoa){
       const amtStr=mCols.amount>=0?String(r[mCols.amount]||""):"0";
       const amount=parseFloat(amtStr.replace(/[^0-9.-]/g,""))||0;
       const key=acc||name;
-      if(!customers[key])customers[key]={account:acc,name,amount:0,orders:[]};
-      customers[key].amount+=amount;
-      cur=key;
-    }else if(c0==="D"&&cur){
+      if(!customers[key])customers[key]={account:acc,name,totalAmount:0};
+      customers[key].totalAmount+=amount;
+      curOrder={orderRef:`${key}_${orders.length+1}`,customerKey:key,amount,items:[]};
+      orders.push(curOrder);
+    }else if(c0==="D"&&curOrder){
       let product=normalizeStr(r[dCols.product]||"");
       if(!product)return;
       const qty=parseInt(r[dCols.qty],10)||1;
@@ -138,37 +142,46 @@ function parseSenbeiAOA(aoa){
         if(idx>=0&&product.endsWith(")")){specText=product.slice(idx+2,-1);product=product.slice(0,idx).trim();}
       }
       const{color,size,style}=parseAllocSpec(specText);
-      customers[cur].orders.push({product,color,size,style,qty});
+      curOrder.items.push({product,color,size,style,qty});
     }
   });
-  return customers;
+  return{customers,orders};
 }
 
 // ── 配貨演算法 ──
-function computeAlloc(customers,stockItems){
+function computeAlloc(parsed,stockItems){
+  const{customers,orders}=parsed;
   const stock={};
   stockItems.forEach(it=>{stock[itemKey(it)]=it.arrivedQty||0;});
-  const skuOrders={};
-  Object.entries(customers).forEach(([key,c])=>{
-    c.orders.forEach(o=>{
-      const k=itemKey(o);
-      if(!skuOrders[k])skuOrders[k]=[];
-      skuOrders[k].push({key,amount:c.amount,product:o.product,color:o.color,size:o.size,style:o.style,qty:o.qty});
+
+  // 每筆訂單獨立配貨，優先順序依該客人的累計總金額
+  const orderResults=orders.map(o=>{
+    const customerTotal=customers[o.customerKey]?.totalAmount||0;
+    const allocated=[];
+    const waiting=[];
+    o.items.forEach(item=>{
+      const k=itemKey(item);
+      const rem=stock[k]||0;
+      const give=Math.min(item.qty,rem);
+      stock[k]=Math.max(0,rem-give);
+      if(give>0)allocated.push({...item,qty:give});
+      if(give<item.qty)waiting.push({...item,qty:item.qty-give});
     });
+    return{...o,allocated,waiting,customerTotal};
   });
-  const results={};
-  Object.keys(customers).forEach(k=>{results[k]={...customers[k],allocated:[],waiting:[]};});
-  Object.entries(skuOrders).forEach(([sku,orders])=>{
-    orders.sort((a,b)=>b.amount-a.amount);
-    let rem=stock[sku]||0;
-    orders.forEach(o=>{
-      const give=Math.min(o.qty,rem);
-      rem-=give;
-      if(give>0)results[o.key].allocated.push({product:o.product,color:o.color,size:o.size,style:o.style,qty:give});
-      if(give<o.qty)results[o.key].waiting.push({product:o.product,color:o.color,size:o.size,style:o.style,qty:o.qty-give});
-    });
+
+  // 依客人總金額排序，再按訂單分組
+  orderResults.sort((a,b)=>(customers[b.customerKey]?.totalAmount||0)-(customers[a.customerKey]?.totalAmount||0));
+
+  // 合併同客人的多筆訂單成一張卡（但保留各訂單細節）
+  const byCustomer={};
+  orderResults.forEach(o=>{
+    const k=o.customerKey;
+    if(!byCustomer[k]){byCustomer[k]={...customers[k],orders:[],totalAmount:customers[k]?.totalAmount||0};}
+    byCustomer[k].orders.push(o);
   });
-  return Object.values(results).sort((a,b)=>b.amount-a.amount);
+
+  return Object.values(byCustomer).sort((a,b)=>b.totalAmount-a.totalAmount);
 }
 
 // ── GitHub Gist ──
@@ -407,7 +420,7 @@ function AllocationView({items,onClose}){
       if(text.charCodeAt(0)===0xFEFF)text=text.slice(1);
       const aoa=text.replace(/\r/g,"").split("\n").filter(Boolean).map(l=>parseLine(l));
       const customers=parseSenbeiAOA(aoa);
-      if(!Object.keys(customers).length){setErr("找不到訂單資料，請確認這是SENBEI匯出的CSV（含M/D開頭的列）");return;}
+      if(!customers.orders||!customers.orders.length){setErr("找不到訂單資料，請確認這是SENBEI匯出的CSV（含M/D開頭的列）");return;}
       setResults(computeAlloc(customers,items));
     };
     reader.readAsText(f,"utf-8");
@@ -415,11 +428,14 @@ function AllocationView({items,onClose}){
   }
 
   function exportCSV(){
-    const header=["IG帳號","客人姓名","訂單金額","商品","顏色","尺寸","款式","數量","狀態"];
+    const header=["IG帳號","客人姓名","客人總金額","訂單編號","訂單金額","商品","顏色","尺寸","款式","數量","狀態"];
     const rows=[];
     results.forEach(c=>{
-      c.allocated.forEach(it=>{rows.push([c.account,c.name,c.amount,it.product,it.color,it.size,it.style,it.qty,"✅ 可出貨"]);});
-      c.waiting.forEach(it=>{rows.push([c.account,c.name,c.amount,it.product,it.color,it.size,it.style,it.qty,"⏳ 待補貨"]);});
+      c.orders.forEach((o,oi)=>{
+        const orderLabel=`訂單${oi+1}`;
+        o.allocated.forEach(it=>{rows.push([c.account,c.name,c.totalAmount,orderLabel,o.amount,it.product,it.color,it.size,it.style,it.qty,"✅ 可出貨"]);});
+        o.waiting.forEach(it=>{rows.push([c.account,c.name,c.totalAmount,orderLabel,o.amount,it.product,it.color,it.size,it.style,it.qty,"⏳ 待補貨"]);});
+      });
     });
     const csv=[header,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
     const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
@@ -427,9 +443,10 @@ function AllocationView({items,onClose}){
     const a=document.createElement("a");a.href=url;a.download="撿貨清單.csv";a.click();URL.revokeObjectURL(url);
   }
 
-  const fullyAllocated=results?results.filter(r=>r.waiting.length===0&&r.allocated.length>0).length:0;
-  const partial=results?results.filter(r=>r.waiting.length>0&&r.allocated.length>0).length:0;
-  const noneAllocated=results?results.filter(r=>r.allocated.length===0).length:0;
+  const totalOrders=results?results.reduce((s,c)=>s+c.orders.length,0):0;
+  const fullyAllocated=results?results.reduce((s,c)=>s+c.orders.filter(o=>o.waiting.length===0&&o.allocated.length>0).length,0):0;
+  const partial=results?results.reduce((s,c)=>s+c.orders.filter(o=>o.waiting.length>0&&o.allocated.length>0).length,0):0;
+  const noneAllocated=results?results.reduce((s,c)=>s+c.orders.filter(o=>o.allocated.length===0).length,0):0;
 
   return(
     <div style={{maxWidth:640,margin:"0 auto",padding:"14px 14px"}}>
@@ -469,51 +486,65 @@ function AllocationView({items,onClose}){
         <>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
             <div style={{fontSize:13,color:C.inkMuted,display:"flex",gap:10,flexWrap:"wrap"}}>
-              <span>共 {results.length} 位客人</span>
-              <span style={{color:C.success}}>✅ 全數配齊 {fullyAllocated}</span>
-              {partial>0&&<span style={{color:C.orange}}>⚡ 部分配貨 {partial}</span>}
-              {noneAllocated>0&&<span style={{color:C.inkMuted}}>⏳ 全待補 {noneAllocated}</span>}
+              <span>共 {results.length} 位客人 / {totalOrders} 筆訂單</span>
+              <span style={{color:C.success}}>✅ 可出貨 {fullyAllocated} 筆</span>
+              {partial>0&&<span style={{color:C.orange}}>⚡ 部分可出 {partial} 筆</span>}
+              {noneAllocated>0&&<span style={{color:C.inkMuted}}>⏳ 全待補 {noneAllocated} 筆</span>}
             </div>
             <button onClick={exportCSV} style={{background:C.info,color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,cursor:"pointer"}}>匯出撿貨清單</button>
           </div>
           {results.map((c,idx)=>{
-            const allGood=c.waiting.length===0&&c.allocated.length>0;
-            const hasWaiting=c.waiting.length>0;
+            const allGood=c.orders.every(o=>o.waiting.length===0&&o.allocated.length>0);
+            const hasAny=c.orders.some(o=>o.allocated.length>0);
             return(
               <div key={c.account||c.name||idx} style={{
                 background:allGood?C.successSoft:C.surface,
-                border:`1px solid ${allGood?C.success:hasWaiting?C.line:C.line}`,
+                border:`1px solid ${allGood?C.success:C.line}`,
                 borderRadius:12,marginBottom:10,padding:12}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                {/* 客人標題列 */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                   <div>
                     <span style={{fontWeight:700,fontSize:14,color:C.ink}}>{c.account||c.name}</span>
                     {c.name&&c.account&&<span style={{fontSize:12,color:C.inkMuted,marginLeft:6}}>{c.name}</span>}
                   </div>
-                  <span style={{fontSize:12,fontFamily:"monospace",color:C.inkMuted}}>NT${c.amount.toLocaleString()}</span>
+                  <span style={{fontSize:12,fontFamily:"monospace",color:C.inkMuted}}>NT${c.totalAmount.toLocaleString()}</span>
                 </div>
-                {c.allocated.length>0&&(
-                  <div style={{marginBottom:c.waiting.length>0?8:0}}>
-                    <div style={{fontSize:11,color:C.success,fontWeight:700,marginBottom:4}}>✅ 可出貨</div>
-                    {c.allocated.map((it,i)=>(
-                      <div key={i} style={{fontSize:13,color:C.success,background:C.successSoft,borderRadius:6,padding:"4px 8px",marginBottom:3,fontWeight:500}}>
-                        {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} <strong>× {it.qty}</strong>
+                {/* 各筆訂單 */}
+                {c.orders.map((o,oi)=>(
+                  <div key={o.orderRef} style={{
+                    borderTop:oi>0?`1px solid ${C.line}`:"none",
+                    paddingTop:oi>0?8:0,
+                    marginTop:oi>0?8:0}}>
+                    {c.orders.length>1&&(
+                      <div style={{fontSize:11,color:C.inkMuted,marginBottom:4,fontWeight:600}}>
+                        訂單 {oi+1}　<span style={{fontFamily:"monospace"}}>NT${o.amount.toLocaleString()}</span>
+                        {o.allocated.length>0&&o.waiting.length===0&&<span style={{color:C.success,marginLeft:6}}>✅ 可全數出貨</span>}
+                        {o.allocated.length>0&&o.waiting.length>0&&<span style={{color:C.orange,marginLeft:6}}>⚡ 部分可出</span>}
+                        {o.allocated.length===0&&<span style={{color:C.inkMuted,marginLeft:6}}>⏳ 全部待補</span>}
                       </div>
-                    ))}
-                  </div>
-                )}
-                {c.waiting.length>0&&(
-                  <div>
-                    <div style={{fontSize:11,color:C.orange,fontWeight:700,marginBottom:4}}>⏳ 待補貨</div>
-                    {c.waiting.map((it,i)=>(
-                      <div key={i} style={{fontSize:13,color:C.orange,background:C.orangeSoft,borderRadius:6,padding:"4px 8px",marginBottom:3}}>
-                        {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                    )}
+                    {o.allocated.length>0&&(
+                      <div style={{marginBottom:o.waiting.length>0?6:0}}>
+                        {c.orders.length===1&&<div style={{fontSize:11,color:C.success,fontWeight:700,marginBottom:4}}>✅ 可出貨</div>}
+                        {o.allocated.map((it,i)=>(
+                          <div key={i} style={{fontSize:13,color:C.success,background:C.successSoft,borderRadius:6,padding:"4px 8px",marginBottom:3,fontWeight:500}}>
+                            {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} <strong>× {it.qty}</strong>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
+                    {o.waiting.length>0&&(
+                      <div>
+                        {c.orders.length===1&&<div style={{fontSize:11,color:C.orange,fontWeight:700,marginBottom:4}}>⏳ 待補貨</div>}
+                        {o.waiting.map((it,i)=>(
+                          <div key={i} style={{fontSize:13,color:C.orange,background:C.orangeSoft,borderRadius:6,padding:"4px 8px",marginBottom:3}}>
+                            {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-                {c.allocated.length===0&&c.waiting.length===0&&(
-                  <div style={{fontSize:12,color:C.inkMuted}}>此場次無訂購商品</div>
-                )}
+                ))}
               </div>
             );
           })}
