@@ -34,6 +34,7 @@ const C={
 };
 const GIST_FILE="stock-tracker-data.json";
 
+// ── 通用工具 ──
 function genId(){return Math.random().toString(36).slice(2)+Date.now().toString(36);}
 function itemKey(it){return[it.product,it.color,it.size,it.style].join("|||");}
 function todayStr(){return new Date().toISOString().slice(0,10);}
@@ -47,33 +48,12 @@ function daysSince(dateStr){
   if(!dateStr||isNaN(new Date(dateStr)))return null;
   return Math.floor((new Date(todayStr())-new Date(dateStr))/(864e5));
 }
+function isLateOrder(it){if(it.allOrdered||it.allArrived||it.firstOrderDate)return false;const d=daysSince(it.importedAt);return d!==null&&d>3;}
+function isLateArrival(it){if(it.allArrived||!it.firstOrderDate)return false;const d=daysSince(it.firstOrderDate);return d!==null&&d>14;}
+function sortPri(it){if(it.allArrived)return 4;if(it.allOrdered)return 3;if(it.firstOrderDate)return 2;return 1;}
+const GROUP_LABEL={1:"📋 未開始訂貨",2:"🚚 訂貨中",3:"📦 全數訂完，待到貨",4:"✅ 已到貨"};
 
-// 警示判斷
-function isLateOrder(it){
-  if(it.allOrdered||it.allArrived||it.firstOrderDate)return false;
-  const d=daysSince(it.importedAt||it.orderDate);
-  return d!==null&&d>3;
-}
-function isLateArrival(it){
-  if(it.allArrived||!it.firstOrderDate)return false;
-  const d=daysSince(it.firstOrderDate);
-  return d!==null&&d>14;
-}
-
-function sortPri(it){
-  if(it.allArrived)return 4;
-  if(it.allOrdered)return 3;
-  if(it.firstOrderDate)return 2;
-  return 1;
-}
-
-const GROUP_LABEL={
-  1:"📋 未開始訂貨",
-  2:"🚚 訂貨中",
-  3:"📦 全數訂完，待到貨",
-  4:"✅ 已到貨",
-};
-
+// ── CSV 解析 ──
 function parseLine(line){
   const out=[];let cur="",q=false;
   for(let i=0;i<line.length;i++){
@@ -84,7 +64,7 @@ function parseLine(line){
   }
   out.push(cur);return out;
 }
-function parseCSV(text){
+function parseBakuCSV(text){
   if(text.charCodeAt(0)===0xFEFF)text=text.slice(1);
   const lines=text.replace(/\r/g,"").split("\n").filter(Boolean);
   if(lines.length<2)return[];
@@ -97,48 +77,133 @@ function parseCSV(text){
   }).filter(r=>r.product);
 }
 
-// 舊資料欄位相容轉換
-function migrateItem(it){
-  return{
-    ...it,
-    firstOrderDate: it.firstOrderDate||it.supplierOrderDate||"",
-    secondOrderDate: it.secondOrderDate||"",
-    allOrdered: it.allOrdered||false,
-    orderedQty: it.orderedQty!=null?it.orderedQty:it.qty,
-    allArrived: it.allArrived||it.arrived||false,
-    arrivedTs: it.arrivedTs||"",
-    importedAt: it.importedAt||it.orderDate||todayStr(),
-  };
+// ── 規格解析（for 配貨） ──
+function normalizeStr(s){return String(s||"").replace(/\s+/g," ").trim();}
+function parseAllocSpec(raw){
+  const s=normalizeStr(raw).replace(/^規格選擇[:：]\s*/,"");
+  if(!s)return{color:"",size:"",style:""};
+  const segs=s.split("/").map(x=>x.trim()).filter(Boolean);
+  const colors=[],sizes=[],extras=[];
+  segs.forEach(seg=>{
+    const m=seg.match(/^(.+?)[:：](.+)$/);
+    if(m){
+      const k=m[1].trim(),v=m[2].trim();
+      if(k.includes("顏色"))colors.push(v);
+      else if(["尺寸","尺碼","身高","體重","全尺碼"].some(x=>k.includes(x)))sizes.push(v);
+      else extras.push(`${k}:${v}`);
+    }else extras.push(seg);
+  });
+  return{color:colors.join("/"),size:sizes.join("/"),style:extras.join("；")};
 }
 
-async function gFetch(token,gistId){
-  const r=await fetch(`https://api.github.com/gists/${gistId}`,{
-    headers:{Authorization:`Bearer ${token}`,Accept:"application/vnd.github.v3+json"}
+// ── SENBEI 訂單 CSV 解析（M/D格式）──
+function parseSenbeiAOA(aoa){
+  let mCols=null,dCols=null;
+  for(const r of aoa){
+    if(!r||!r[0])continue;
+    const c0=normalizeStr(String(r[0]));
+    if(c0.includes("表頭")&&c0.includes("M")){
+      const m={};r.forEach((v,i)=>{if(v)m[normalizeStr(String(v))]=i;});
+      mCols={account:m["訂購人"]??1,name:m["收件人"]??2,amount:m["小計"]??m["總金額(含運)"]??m["總金額"]??-1};
+    }
+    if(c0.includes("明細")&&c0.includes("D")){
+      const m={};r.forEach((v,i)=>{if(v)m[normalizeStr(String(v))]=i;});
+      const sk=Object.keys(m).find(k=>k.includes("規格"));
+      dCols={product:m["商品名稱"]??1,qty:m["訂購數量"]??3,spec:sk?m[sk]:4};
+    }
+    if(mCols&&dCols)break;
+  }
+  mCols=mCols||{account:1,name:2,amount:-1};
+  dCols=dCols||{product:1,qty:3,spec:4};
+  const customers={};
+  let cur=null;
+  aoa.forEach(r=>{
+    const c0=normalizeStr(String(r?.[0]??""));
+    if(c0==="M"){
+      const acc=normalizeStr(r[mCols.account]||"");
+      const name=normalizeStr(r[mCols.name]||"");
+      const amtStr=mCols.amount>=0?String(r[mCols.amount]||""):"0";
+      const amount=parseFloat(amtStr.replace(/[^0-9.-]/g,""))||0;
+      const key=acc||name;
+      if(!customers[key])customers[key]={account:acc,name,amount:0,orders:[]};
+      customers[key].amount+=amount;
+      cur=key;
+    }else if(c0==="D"&&cur){
+      let product=normalizeStr(r[dCols.product]||"");
+      if(!product)return;
+      const qty=parseInt(r[dCols.qty],10)||1;
+      let specText=normalizeStr(r[dCols.spec]||"");
+      if(!specText){
+        const idx=product.lastIndexOf("_(");
+        if(idx>=0&&product.endsWith(")")){specText=product.slice(idx+2,-1);product=product.slice(0,idx).trim();}
+      }
+      const{color,size,style}=parseAllocSpec(specText);
+      customers[cur].orders.push({product,color,size,style,qty});
+    }
   });
+  return customers;
+}
+
+// ── 配貨演算法 ──
+function computeAlloc(customers,stockItems){
+  const stock={};
+  stockItems.forEach(it=>{stock[itemKey(it)]=it.arrivedQty||0;});
+  const skuOrders={};
+  Object.entries(customers).forEach(([key,c])=>{
+    c.orders.forEach(o=>{
+      const k=itemKey(o);
+      if(!skuOrders[k])skuOrders[k]=[];
+      skuOrders[k].push({key,amount:c.amount,product:o.product,color:o.color,size:o.size,style:o.style,qty:o.qty});
+    });
+  });
+  const results={};
+  Object.keys(customers).forEach(k=>{results[k]={...customers[k],allocated:[],waiting:[]};});
+  Object.entries(skuOrders).forEach(([sku,orders])=>{
+    orders.sort((a,b)=>b.amount-a.amount);
+    let rem=stock[sku]||0;
+    orders.forEach(o=>{
+      const give=Math.min(o.qty,rem);
+      rem-=give;
+      if(give>0)results[o.key].allocated.push({product:o.product,color:o.color,size:o.size,style:o.style,qty:give});
+      if(give<o.qty)results[o.key].waiting.push({product:o.product,color:o.color,size:o.size,style:o.style,qty:o.qty-give});
+    });
+  });
+  return Object.values(results).sort((a,b)=>b.amount-a.amount);
+}
+
+// ── GitHub Gist ──
+async function gFetch(token,gistId){
+  const r=await fetch(`https://api.github.com/gists/${gistId}`,{headers:{Authorization:`Bearer ${token}`,Accept:"application/vnd.github.v3+json"}});
   if(!r.ok)throw new Error(`無法讀取 (HTTP ${r.status})`);
   const d=await r.json();
   const content=d.files[GIST_FILE]?.content;
   try{return(JSON.parse(content||"{}").items||[]).map(migrateItem);}catch{return[];}
 }
 async function gSave(token,gistId,items){
-  const r=await fetch(`https://api.github.com/gists/${gistId}`,{
-    method:"PATCH",
-    headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
-    body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify({items},null,2)}}})
-  });
+  const r=await fetch(`https://api.github.com/gists/${gistId}`,{method:"PATCH",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({files:{[GIST_FILE]:{content:JSON.stringify({items},null,2)}}})});
   if(!r.ok)throw new Error(`儲存失敗 (HTTP ${r.status})`);
 }
 async function gCreate(token){
-  const r=await fetch("https://api.github.com/gists",{
-    method:"POST",
-    headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
-    body:JSON.stringify({description:"備貨追蹤 - 理貨台",public:false,files:{[GIST_FILE]:{content:JSON.stringify({items:[]})}}})
-  });
-  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(`建立失敗 (${r.status})：${e.message||"請確認 Token 是否有 gist 權限"}`);}
+  const r=await fetch("https://api.github.com/gists",{method:"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({description:"備貨追蹤 - 理貨台",public:false,files:{[GIST_FILE]:{content:JSON.stringify({items:[]})}}})});
+  if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(`建立失敗 (${r.status})：${e.message||"請確認Token是否有gist權限"}`);}
   return(await r.json()).id;
 }
+function migrateItem(it){
+  return{
+    ...it,
+    firstOrderDate:it.firstOrderDate||it.supplierOrderDate||"",
+    secondOrderDate:it.secondOrderDate||"",
+    allOrdered:it.allOrdered||false,
+    orderedQty:it.orderedQty!=null?it.orderedQty:it.qty,
+    arrivedQty:it.arrivedQty!=null?it.arrivedQty:(it.arrived?it.qty:0),
+    allArrived:it.allArrived||it.arrived||false,
+    arrivedTs:it.arrivedTs||"",
+    firstArrivedTs:it.firstArrivedTs||"",
+    importedAt:it.importedAt||it.orderDate||todayStr(),
+  };
+}
 
-// ── Setup ──
+// ── 設定畫面 ──
 function Setup({onDone}){
   const[tkn,setTkn]=useState("");
   const[gid,setGid]=useState("");
@@ -147,8 +212,8 @@ function Setup({onDone}){
   const[busy,setBusy]=useState(false);
   const[newId,setNewId]=useState("");
   async function handle(createNew){
-    if(!tkn.trim()){setErr("請輸入 Token");return;}
-    if(!createNew&&!gid.trim()){setErr("請輸入 Gist ID");return;}
+    if(!tkn.trim()){setErr("請輸入Token");return;}
+    if(!createNew&&!gid.trim()){setErr("請輸入Gist ID");return;}
     setErr("");setBusy(true);
     try{
       let id=gid.trim();
@@ -162,21 +227,21 @@ function Setup({onDone}){
   return(
     <div style={{background:C.bg,minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <div style={{background:C.surface,borderRadius:16,padding:24,maxWidth:480,width:"100%",border:`1px solid ${C.line}`}}>
-        <h1 style={{color:C.stamp}} className="font-bold text-xl mb-1">備貨追蹤 初次設定</h1>
-        <p style={{color:C.inkMuted}} className="text-xs mb-5">資料儲存在 GitHub Gist，換裝置關手機都不會消失</p>
+        <h1 style={{color:C.stamp,fontWeight:700,fontSize:20,marginBottom:4}}>備貨追蹤 初次設定</h1>
+        <p style={{color:C.inkMuted,fontSize:12,marginBottom:20}}>資料儲存在GitHub Gist，換裝置關手機都不會消失</p>
         <div style={{background:C.infoSoft,color:C.info,border:`1px solid ${C.info}`,borderRadius:10,padding:12,marginBottom:20,fontSize:12,lineHeight:2}}>
-          <strong>先建立 GitHub 存取金鑰（只要做一次）</strong><br/>
+          <strong>先建立GitHub存取金鑰（只要做一次）</strong><br/>
           1. github.com → 右上角頭像 → Settings<br/>
           2. 左側最下方 Developer settings → Personal access tokens → Tokens (classic)<br/>
           3. Generate new token (classic) → 只勾 <code style={{background:"rgba(0,0,0,0.08)",padding:"1px 4px",borderRadius:3}}>gist</code> → Generate token<br/>
-          4. 複製產生的 token（只出現一次）
+          4. 複製產生的token（只出現一次）
         </div>
-        <label style={{color:C.inkMuted}} className="text-xs block mb-1">GitHub Token</label>
+        <label style={{color:C.inkMuted,fontSize:12,display:"block",marginBottom:4}}>GitHub Token</label>
         <input type="password" value={tkn} onChange={e=>setTkn(e.target.value)} placeholder="ghp_xxxxxxxxxxxx"
-          className="w-full px-3 py-2 rounded-lg mb-3 text-sm" style={{border:`1px solid ${C.line}`,fontFamily:"monospace"}}/>
-        <label style={{color:C.inkMuted}} className="text-xs block mb-1">第一個場次名稱（例如：0622直播）</label>
+          style={{width:"100%",border:`1px solid ${C.line}`,borderRadius:8,padding:"8px 12px",fontSize:13,marginBottom:12,fontFamily:"monospace",boxSizing:"border-box"}}/>
+        <label style={{color:C.inkMuted,fontSize:12,display:"block",marginBottom:4}}>第一個場次名稱（例如：0622直播）</label>
         <input type="text" value={name} onChange={e=>setName(e.target.value)} placeholder="第一場次"
-          className="w-full px-3 py-2 rounded-lg mb-4 text-sm" style={{border:`1px solid ${C.line}`}}/>
+          style={{width:"100%",border:`1px solid ${C.line}`,borderRadius:8,padding:"8px 12px",fontSize:13,marginBottom:16,boxSizing:"border-box"}}/>
         {newId&&(
           <div style={{background:C.successSoft,color:C.success,border:`1px solid ${C.success}`,borderRadius:10,padding:12,marginBottom:16,fontSize:12}}>
             ✅ 建立成功！Gist ID：<br/>
@@ -186,17 +251,15 @@ function Setup({onDone}){
         )}
         {err&&<div style={{color:C.stamp,background:"#FEF2F2",border:"1px solid #FCA5A5",borderRadius:8,padding:"8px 12px",marginBottom:12,fontSize:12}}>{err}</div>}
         <button onClick={()=>handle(true)} disabled={!tkn||busy}
-          style={{background:C.stamp,opacity:(!tkn||busy)?0.5:1,border:"none",cursor:"pointer"}}
-          className="w-full text-white font-medium py-2.5 rounded-lg mb-3 text-sm">
+          style={{width:"100%",background:tkn&&!busy?C.stamp:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"11px",fontSize:14,fontWeight:700,cursor:tkn&&!busy?"pointer":"default",marginBottom:12}}>
           {busy?"設定中…":"🆕 自動建立儲存空間（第一次用）"}
         </button>
         <div style={{color:C.inkMuted,textAlign:"center",fontSize:12,marginBottom:12}}>── 換裝置重新登入 ──</div>
-        <label style={{color:C.inkMuted}} className="text-xs block mb-1">已有的 Gist ID</label>
-        <input type="text" value={gid} onChange={e=>setGid(e.target.value)} placeholder="貼上之前記下的 Gist ID"
-          className="w-full px-3 py-2 rounded-lg mb-3 text-sm" style={{border:`1px solid ${C.line}`,fontFamily:"monospace"}}/>
+        <label style={{color:C.inkMuted,fontSize:12,display:"block",marginBottom:4}}>已有的Gist ID</label>
+        <input type="text" value={gid} onChange={e=>setGid(e.target.value)} placeholder="貼上之前記下的Gist ID"
+          style={{width:"100%",border:`1px solid ${C.line}`,borderRadius:8,padding:"8px 12px",fontSize:13,marginBottom:10,fontFamily:"monospace",boxSizing:"border-box"}}/>
         <button onClick={()=>handle(false)} disabled={!tkn||!gid||busy}
-          style={{border:`1px solid ${C.line}`,color:C.ink,background:C.surface,opacity:(!tkn||!gid||busy)?0.5:1,cursor:"pointer"}}
-          className="w-full font-medium py-2 rounded-lg text-sm">
+          style={{width:"100%",border:`1px solid ${C.line}`,color:C.ink,background:C.surface,borderRadius:8,padding:"10px",fontSize:13,cursor:tkn&&gid&&!busy?"pointer":"default",opacity:tkn&&gid&&!busy?1:0.5}}>
           {busy?"連線中…":"使用現有儲存空間"}
         </button>
       </div>
@@ -204,33 +267,26 @@ function Setup({onDone}){
   );
 }
 
-// ── Item Card ──
+// ── 商品卡 ──
 function ItemCard({it,sel,onToggleSel,onUpdate}){
   const late3=isLateOrder(it);
   const late14=isLateArrival(it);
-  const days3=late3?daysSince(it.importedAt||it.orderDate):null;
+  const days3=late3?daysSince(it.importedAt):null;
   const days14=late14?daysSince(it.firstOrderDate):null;
-
-  let borderColor=C.line;
-  let bgColor=C.surface;
+  let borderColor=C.line,bgColor=C.surface;
   if(it.allArrived){bgColor=C.successSoft;borderColor=C.success;}
   else if(late14){bgColor=C.warningSoft;borderColor=C.warning;}
-  else if(late3){bgColor:C.orangeSoft;borderColor="#FFB74D";}
   if(sel&&!it.allArrived){borderColor=C.info;}
 
   function handleArrivedQty(val){
     const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;
     const n=Math.max(0,parseInt(val,10)||0);
-    const wasZero=!it.arrivedQty||it.arrivedQty===0;
+    const wasZero=!it.arrivedQty;
     const nowFull=n>=maxQ;
-    const updates={arrivedQty:n};
-    if(n>0&&wasZero&&!it.firstArrivedTs)updates.firstArrivedTs=new Date().toISOString();
-    if(n===0)updates.firstArrivedTs="";
-    if(nowFull&&!it.allArrived){
-      updates.allArrived=true;
-      if(!it.arrivedTs)updates.arrivedTs=new Date().toISOString();
-    }
-    Object.keys(updates).forEach(k=>onUpdate(k,updates[k]));
+    onUpdate("arrivedQty",n);
+    if(n>0&&wasZero&&!it.firstArrivedTs)onUpdate("firstArrivedTs",new Date().toISOString());
+    if(n===0)onUpdate("firstArrivedTs","");
+    if(nowFull&&!it.allArrived){onUpdate("allArrived",true);if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());}
   }
   function handleAllArrived(checked){
     const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;
@@ -239,153 +295,239 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
       if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());
       if(!it.arrivedQty||it.arrivedQty<maxQ)onUpdate("arrivedQty",maxQ);
       if(!it.firstArrivedTs)onUpdate("firstArrivedTs",new Date().toISOString());
-    }else{
-      onUpdate("arrivedTs","");
-    }
+    }else{onUpdate("arrivedTs","");}
   }
 
   return(
-    <div style={{background:bgColor,border:`2px solid ${borderColor}`,borderRadius:12,marginBottom:10,padding:"12px 14px",
-      boxShadow:sel?"0 0 0 3px rgba(29,111,163,0.15)":"none",transition:"border-color .15s"}}>
-
-      {/* 警示徽章 */}
+    <div style={{background:bgColor,border:`2px solid ${borderColor}`,borderRadius:12,marginBottom:10,padding:"12px 14px",boxShadow:sel?"0 0 0 3px rgba(29,111,163,0.15)":"none"}}>
       {(late3||late14)&&(
         <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
           {late3&&<span style={{background:C.orangeSoft,color:C.orange,border:`1px solid ${C.orange}`,borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>⚠ {days3}天未訂貨</span>}
           {late14&&<span style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:20,padding:"2px 10px",fontSize:11,fontWeight:600}}>🚨 {days14}天未到貨</span>}
         </div>
       )}
-
-      {/* 商品名稱列 */}
+      {/* 商品名稱 */}
       <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:10}}>
-        <input type="checkbox" checked={sel} onChange={onToggleSel}
-          style={{width:22,height:22,marginTop:2,accentColor:C.info,cursor:"pointer",flexShrink:0}}/>
+        <input type="checkbox" checked={sel} onChange={onToggleSel} style={{width:22,height:22,marginTop:2,accentColor:C.info,cursor:"pointer",flexShrink:0}}/>
         <div style={{flex:1,minWidth:0}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-            <span style={{color:it.allArrived?C.success:C.ink,fontWeight:700,fontSize:15}}>
-              {it.product}
-            </span>
-            <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+            <span style={{color:it.allArrived?C.success:C.ink,fontWeight:700,fontSize:15}}>{it.product}</span>
+            <div style={{display:"flex",alignItems:"center",gap:5,flexShrink:0}}>
               <span style={{color:C.inkMuted,fontSize:11}}>需求</span>
               <span style={{background:C.stripe,color:C.inkMuted,borderRadius:20,padding:"2px 8px",fontSize:12}}>x{it.qty}</span>
               <span style={{color:C.inkMuted,fontSize:11}}>訂購</span>
               <input type="number" min="0" value={it.orderedQty!=null?it.orderedQty:it.qty}
                 onChange={e=>onUpdate("orderedQty",Math.max(0,parseInt(e.target.value,10)||0))}
-                style={{width:52,border:`1px solid ${C.info}`,borderRadius:8,padding:"2px 6px",fontSize:13,textAlign:"center",background:"#EFF6FC",color:C.info,fontWeight:600}}/>
+                style={{width:50,border:`1px solid ${C.info}`,borderRadius:8,padding:"2px 5px",fontSize:13,textAlign:"center",background:"#EFF6FC",color:C.info,fontWeight:600}}/>
             </div>
           </div>
-          {(it.color||it.size||it.style)&&(
-            <div style={{color:C.inkMuted,fontSize:12,marginTop:2}}>
-              {[it.color,it.size,it.style].filter(Boolean).join(" · ")}
-            </div>
-          )}
+          {(it.color||it.size||it.style)&&<div style={{color:C.inkMuted,fontSize:12,marginTop:2}}>{[it.color,it.size,it.style].filter(Boolean).join(" · ")}</div>}
         </div>
       </div>
-
-      {/* 訂貨日期 */}
+      {/* 訂貨日 */}
       <div style={{display:"flex",gap:8,marginBottom:10,paddingLeft:32}}>
         <div style={{flex:1}}>
           <div style={{color:C.inkMuted,fontSize:11,marginBottom:4}}>首次訂購日</div>
-          <div style={{display:"flex",alignItems:"center",gap:4}}>
-            <input type="date" value={it.firstOrderDate||""} onChange={e=>onUpdate("firstOrderDate",e.target.value)}
-              disabled={!!it.allOrdered}
-              style={{flex:1,border:`1px solid ${it.allOrdered?"transparent":C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,
-                color:it.allOrdered?C.inkMuted:C.ink,background:it.allOrdered?"transparent":C.bg,minWidth:0,
-                opacity:it.allOrdered?0.6:1}}/>
+          <div style={{display:"flex",gap:4}}>
+            <input type="date" value={it.firstOrderDate||""} onChange={e=>onUpdate("firstOrderDate",e.target.value)} disabled={!!it.allOrdered}
+              style={{flex:1,border:`1px solid ${it.allOrdered?"transparent":C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:it.allOrdered?C.inkMuted:C.ink,background:it.allOrdered?"transparent":C.bg,minWidth:0,opacity:it.allOrdered?0.6:1}}/>
             {it.firstOrderDate&&!it.allOrdered&&(
-              <button onClick={()=>onUpdate("firstOrderDate","")}
-                style={{flexShrink:0,width:26,height:26,borderRadius:6,border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+              <button onClick={()=>onUpdate("firstOrderDate","")} style={{width:26,height:34,borderRadius:6,border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,fontSize:14,cursor:"pointer",flexShrink:0}}>×</button>
             )}
           </div>
         </div>
         <div style={{flex:1}}>
-          <div style={{color:C.inkMuted,fontSize:11,marginBottom:4}}>二次訂購日<span style={{fontSize:10}}> 選填</span></div>
-          <div style={{display:"flex",alignItems:"center",gap:4}}>
-            <input type="date" value={it.secondOrderDate||""} onChange={e=>onUpdate("secondOrderDate",e.target.value)}
-              disabled={!!it.allOrdered}
-              style={{flex:1,border:`1px solid ${it.allOrdered?"transparent":C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,
-                color:it.allOrdered?C.inkMuted:C.ink,background:it.allOrdered?"transparent":C.bg,minWidth:0,
-                opacity:it.allOrdered?0.6:1}}/>
+          <div style={{color:C.inkMuted,fontSize:11,marginBottom:4}}>二次訂購日 <span style={{fontSize:10}}>選填</span></div>
+          <div style={{display:"flex",gap:4}}>
+            <input type="date" value={it.secondOrderDate||""} onChange={e=>onUpdate("secondOrderDate",e.target.value)} disabled={!!it.allOrdered}
+              style={{flex:1,border:`1px solid ${it.allOrdered?"transparent":C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:it.allOrdered?C.inkMuted:C.ink,background:it.allOrdered?"transparent":C.bg,minWidth:0,opacity:it.allOrdered?0.6:1}}/>
             {it.secondOrderDate&&!it.allOrdered&&(
-              <button onClick={()=>onUpdate("secondOrderDate","")}
-                style={{flexShrink:0,width:26,height:26,borderRadius:6,border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>×</button>
+              <button onClick={()=>onUpdate("secondOrderDate","")} style={{width:26,height:34,borderRadius:6,border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,fontSize:14,cursor:"pointer",flexShrink:0}}>×</button>
             )}
           </div>
         </div>
       </div>
-
       {/* 全數訂完 */}
       <div style={{paddingLeft:32,marginBottom:10}}>
         {it.allOrdered?(
           <div style={{display:"flex",alignItems:"center",gap:8}}>
             <span style={{fontSize:13,color:C.info,fontWeight:600}}>🔒 全數訂完，等待到貨</span>
             <button onClick={()=>{if(window.confirm("確定要解鎖並修改訂貨資料？"))onUpdate("allOrdered",false);}}
-              style={{fontSize:11,color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"2px 8px",cursor:"pointer"}}>
-              解鎖
-            </button>
+              style={{fontSize:11,color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"2px 8px",cursor:"pointer"}}>解鎖</button>
           </div>
         ):(
           <label style={{display:"flex",alignItems:"center",gap:8,cursor:"pointer"}}>
-            <input type="checkbox" checked={false} onChange={e=>{if(e.target.checked)onUpdate("allOrdered",true);}}
-              style={{width:20,height:20,accentColor:C.info,cursor:"pointer"}}/>
+            <input type="checkbox" checked={false} onChange={e=>{if(e.target.checked)onUpdate("allOrdered",true);}} style={{width:20,height:20,accentColor:C.info,cursor:"pointer"}}/>
             <span style={{fontSize:13,color:C.inkMuted}}>全數訂完</span>
           </label>
         )}
       </div>
-
-      {/* 到貨確認 */}
+      {/* 到貨 */}
       <div style={{paddingLeft:32,borderTop:`1px solid ${C.line}`,paddingTop:10}}>
         <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
-            <span style={{color:C.inkMuted,fontSize:12,whiteSpace:"nowrap"}}>已到貨</span>
-            <input type="number" min="0" value={it.arrivedQty||0}
-              onChange={e=>handleArrivedQty(e.target.value)}
+            <span style={{color:C.inkMuted,fontSize:12}}>已到貨</span>
+            <input type="number" min="0" value={it.arrivedQty||0} onChange={e=>handleArrivedQty(e.target.value)}
               style={{width:52,border:`1px solid ${C.line}`,borderRadius:8,padding:"5px 6px",fontSize:14,textAlign:"center",background:C.bg,color:C.ink}}/>
-            <span style={{color:C.inkMuted,fontSize:12,whiteSpace:"nowrap"}}>/ {it.orderedQty!=null?it.orderedQty:it.qty} 件</span>
+            <span style={{color:C.inkMuted,fontSize:12}}>/ {it.orderedQty!=null?it.orderedQty:it.qty} 件</span>
           </div>
           <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
-            <input type="checkbox" checked={!!it.allArrived} onChange={e=>handleAllArrived(e.target.checked)}
-              style={{width:22,height:22,accentColor:C.success,cursor:"pointer"}}/>
-            <span style={{fontSize:13,color:it.allArrived?C.success:C.inkMuted,fontWeight:it.allArrived?"600":"400"}}>
-              {it.allArrived?"✅ 全數到貨":"全數到貨"}
-            </span>
+            <input type="checkbox" checked={!!it.allArrived} onChange={e=>handleAllArrived(e.target.checked)} style={{width:22,height:22,accentColor:C.success,cursor:"pointer"}}/>
+            <span style={{fontSize:13,color:it.allArrived?C.success:C.inkMuted,fontWeight:it.allArrived?"600":"400"}}>{it.allArrived?"✅ 全數到貨":"全數到貨"}</span>
           </label>
-          {it.arrivedTs&&(
-            <span style={{color:C.success,fontSize:11,whiteSpace:"nowrap"}}>{fmtTs(it.arrivedTs)}</span>
-          )}
+          {it.arrivedTs&&<span style={{color:C.success,fontSize:11}}>{fmtTs(it.arrivedTs)}</span>}
         </div>
         {it.arrivedQty>0&&!it.allArrived&&(
-          <div style={{color:C.orange,fontSize:11,marginTop:4,display:"flex",alignItems:"center",gap:6}}>
+          <div style={{color:C.orange,fontSize:11,marginTop:4,display:"flex",gap:8}}>
             <span>⚡ 部分到貨：{it.arrivedQty}/{it.orderedQty!=null?it.orderedQty:it.qty} 件</span>
-            {it.firstArrivedTs&&<span style={{color:C.inkMuted}}>首次到貨 {fmtTs(it.firstArrivedTs)}</span>}
+            {it.firstArrivedTs&&<span style={{color:C.inkMuted}}>首次 {fmtTs(it.firstArrivedTs)}</span>}
           </div>
         )}
         {it.allArrived&&it.firstArrivedTs&&it.arrivedTs&&it.firstArrivedTs!==it.arrivedTs&&(
-          <div style={{color:C.inkMuted,fontSize:11,marginTop:4}}>
-            首次到貨 {fmtTs(it.firstArrivedTs)}　全數到貨 {fmtTs(it.arrivedTs)}
-          </div>
+          <div style={{color:C.inkMuted,fontSize:11,marginTop:4}}>首次到貨 {fmtTs(it.firstArrivedTs)}　全數到貨 {fmtTs(it.arrivedTs)}</div>
         )}
       </div>
     </div>
   );
 }
 
-// ── Main ──
+// ── 配貨視圖 ──
+function AllocationView({items,onClose}){
+  const[results,setResults]=useState(null);
+  const[fileName,setFileName]=useState("");
+  const[err,setErr]=useState("");
+  const fileRef=useRef(null);
+
+  function handleFile(e){
+    const f=e.target.files[0];if(!f)return;
+    setFileName(f.name);setErr("");
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      let text=ev.target.result;
+      if(text.charCodeAt(0)===0xFEFF)text=text.slice(1);
+      const aoa=text.replace(/\r/g,"").split("\n").filter(Boolean).map(l=>parseLine(l));
+      const customers=parseSenbeiAOA(aoa);
+      if(!Object.keys(customers).length){setErr("找不到訂單資料，請確認這是SENBEI匯出的CSV（含M/D開頭的列）");return;}
+      setResults(computeAlloc(customers,items));
+    };
+    reader.readAsText(f,"utf-8");
+    e.target.value="";
+  }
+
+  function exportCSV(){
+    const header=["IG帳號","客人姓名","訂單金額","商品","顏色","尺寸","款式","數量","狀態"];
+    const rows=[];
+    results.forEach(c=>{
+      c.allocated.forEach(it=>{rows.push([c.account,c.name,c.amount,it.product,it.color,it.size,it.style,it.qty,"✅ 可出貨"]);});
+      c.waiting.forEach(it=>{rows.push([c.account,c.name,c.amount,it.product,it.color,it.size,it.style,it.qty,"⏳ 待補貨"]);});
+    });
+    const csv=[header,...rows].map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",")).join("\n");
+    const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");a.href=url;a.download="撿貨清單.csv";a.click();URL.revokeObjectURL(url);
+  }
+
+  const fullyAllocated=results?results.filter(r=>r.waiting.length===0&&r.allocated.length>0).length:0;
+  const partial=results?results.filter(r=>r.waiting.length>0&&r.allocated.length>0).length:0;
+  const noneAllocated=results?results.filter(r=>r.allocated.length===0).length:0;
+
+  return(
+    <div style={{maxWidth:640,margin:"0 auto",padding:"14px 14px"}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16}}>
+        <div>
+          <div style={{fontWeight:700,fontSize:16,color:C.ink}}>配貨</div>
+          <div style={{fontSize:12,color:C.inkMuted}}>依訂單金額高低，自動分配已到貨的庫存</div>
+        </div>
+        <button onClick={onClose} style={{color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:8,padding:"6px 12px",fontSize:13,cursor:"pointer"}}>← 返回</button>
+      </div>
+
+      <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:12,padding:16,marginBottom:16}}>
+        <div style={{fontSize:13,fontWeight:600,color:C.ink,marginBottom:6}}>上傳 SENBEI 訂單 CSV</div>
+        <div style={{fontSize:12,color:C.inkMuted,marginBottom:10}}>和匯入理貨台的那份相同，系統會自動對照目前已到貨數量進行配貨</div>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <button onClick={()=>fileRef.current.click()} style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"8px 14px",fontSize:13,fontWeight:600,cursor:"pointer"}}>選擇訂單CSV</button>
+          {fileName&&<span style={{fontSize:12,color:C.inkMuted}}>{fileName}</span>}
+        </div>
+        <input ref={fileRef} type="file" accept=".csv" style={{display:"none"}} onChange={handleFile}/>
+        {err&&<div style={{color:C.stamp,fontSize:12,marginTop:8}}>{err}</div>}
+      </div>
+
+      {!results&&(
+        <div style={{background:C.infoSoft,border:`1px solid ${C.info}`,borderRadius:12,padding:14,fontSize:12,color:C.info,lineHeight:1.7}}>
+          配貨邏輯：同一件商品，訂單金額較高的客人優先分配到現有庫存。庫存不足時，金額較低的客人會列為「待補貨」，等下一批到貨再處理。
+        </div>
+      )}
+
+      {results&&(
+        <>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}}>
+            <div style={{fontSize:13,color:C.inkMuted,display:"flex",gap:10,flexWrap:"wrap"}}>
+              <span>共 {results.length} 位客人</span>
+              <span style={{color:C.success}}>✅ 全數配齊 {fullyAllocated}</span>
+              {partial>0&&<span style={{color:C.orange}}>⚡ 部分配貨 {partial}</span>}
+              {noneAllocated>0&&<span style={{color:C.inkMuted}}>⏳ 全待補 {noneAllocated}</span>}
+            </div>
+            <button onClick={exportCSV} style={{background:C.info,color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,cursor:"pointer"}}>匯出撿貨清單</button>
+          </div>
+          {results.map((c,idx)=>{
+            const allGood=c.waiting.length===0&&c.allocated.length>0;
+            const hasWaiting=c.waiting.length>0;
+            return(
+              <div key={c.account||c.name||idx} style={{
+                background:allGood?C.successSoft:C.surface,
+                border:`1px solid ${allGood?C.success:hasWaiting?C.line:C.line}`,
+                borderRadius:12,marginBottom:10,padding:12}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                  <div>
+                    <span style={{fontWeight:700,fontSize:14,color:C.ink}}>{c.account||c.name}</span>
+                    {c.name&&c.account&&<span style={{fontSize:12,color:C.inkMuted,marginLeft:6}}>{c.name}</span>}
+                  </div>
+                  <span style={{fontSize:12,fontFamily:"monospace",color:C.inkMuted}}>NT${c.amount.toLocaleString()}</span>
+                </div>
+                {c.allocated.length>0&&(
+                  <div style={{marginBottom:c.waiting.length>0?8:0}}>
+                    <div style={{fontSize:11,color:C.success,fontWeight:600,marginBottom:4}}>✅ 可出貨</div>
+                    {c.allocated.map((it,i)=>(
+                      <div key={i} style={{fontSize:13,color:C.ink,padding:"2px 0"}}>
+                        {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {c.waiting.length>0&&(
+                  <div>
+                    <div style={{fontSize:11,color:C.orange,fontWeight:600,marginBottom:4}}>⏳ 待補貨</div>
+                    {c.waiting.map((it,i)=>(
+                      <div key={i} style={{fontSize:13,color:C.inkMuted,padding:"2px 0"}}>
+                        {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {c.allocated.length===0&&c.waiting.length===0&&(
+                  <div style={{fontSize:12,color:C.inkMuted}}>此場次無訂購商品</div>
+                )}
+              </div>
+            );
+          })}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── 主應用 ──
 function App(){
-  // 多場次：workspaces = [{name, gistId}, ...]
+  // 多場次
   const[token,setToken]=useState(()=>localStorage.getItem("st_token")||"");
   const[workspaces,setWorkspaces]=useState(()=>{
     const raw=localStorage.getItem("st_workspaces");
     if(raw){try{return JSON.parse(raw);}catch{}}
-    // 相容舊版單一 Gist
     const oldGist=localStorage.getItem("st_gist_id");
     if(oldGist)return[{name:"第一場次",gistId:oldGist}];
     return[];
   });
-  const[activeIdx,setActiveIdx]=useState(()=>{
-    const i=parseInt(localStorage.getItem("st_active")||"0",10);
-    return isNaN(i)?0:i;
-  });
+  const[activeIdx,setActiveIdx]=useState(()=>{const i=parseInt(localStorage.getItem("st_active")||"0",10);return isNaN(i)?0:i;});
   const gistId=workspaces[activeIdx]?.gistId||"";
   const[setupMode,setSetupMode]=useState(()=>{
     const raw=localStorage.getItem("st_workspaces");
@@ -396,6 +538,7 @@ function App(){
   const[newWsName,setNewWsName]=useState("");
   const[newWsBusy,setNewWsBusy]=useState(false);
   const[newWsErr,setNewWsErr]=useState("");
+  // 追蹤
   const[items,setItems]=useState([]);
   const[filter,setFilter]=useState("unordered");
   const[search,setSearch]=useState("");
@@ -407,15 +550,15 @@ function App(){
   const[batchSel,setBatchSel]=useState(new Set());
   const[batchDate1,setBatchDate1]=useState("");
   const[batchDate2,setBatchDate2]=useState("");
+  // 配貨模式
+  const[allocMode,setAllocMode]=useState(false);
   const fileRef=useRef(null);
   const saveTimer=useRef(null);
-  const pendingUpdates=useRef({});
 
   useEffect(()=>{
     if(!setupMode&&token&&gistId){
       setLoading(true);
-      gFetch(token,gistId).then(its=>{setItems(its);setLoading(false);})
-        .catch(e=>{setGlobalErr(e.message);setLoading(false);});
+      gFetch(token,gistId).then(its=>{setItems(its);setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});
     }
   },[]);
 
@@ -423,34 +566,19 @@ function App(){
     if(saveTimer.current)clearTimeout(saveTimer.current);
     saveTimer.current=setTimeout(()=>{
       setSaving(true);
-      gSave(token,gistId,newItems)
-        .then(()=>{setSaving(false);setLastSaved(new Date());})
-        .catch(e=>{setSaving(false);setGlobalErr("自動儲存失敗："+e.message);});
+      gSave(token,gistId,newItems).then(()=>{setSaving(false);setLastSaved(new Date());}).catch(e=>{setSaving(false);setGlobalErr("自動儲存失敗："+e.message);});
     },800);
   },[token,gistId]);
 
-  function updateField(id,field,value){
-    setItems(prev=>{
-      const next=prev.map(it=>it.id===id?{...it,[field]:value}:it);
-      scheduleSave(next);return next;
-    });
-  }
-  // 批次更新同一個 item 多個欄位（避免連續setState覆蓋）
-  function saveWorkspaces(ws,idx){
-    localStorage.setItem("st_workspaces",JSON.stringify(ws));
-    localStorage.setItem("st_active",String(idx));
-  }
+  function updateField(id,field,value){setItems(prev=>{const next=prev.map(it=>it.id===id?{...it,[field]:value}:it);scheduleSave(next);return next;});}
+
+  function saveWorkspaces(ws,idx){localStorage.setItem("st_workspaces",JSON.stringify(ws));localStorage.setItem("st_active",String(idx));}
 
   function switchWorkspace(idx){
-    setActiveIdx(idx);
-    localStorage.setItem("st_active",String(idx));
-    setItems([]);setFilter("unordered");setSearch("");setShowWorkspaces(false);
+    setActiveIdx(idx);localStorage.setItem("st_active",String(idx));
+    setItems([]);setFilter("unordered");setSearch("");setShowWorkspaces(false);setAllocMode(false);
     const gid=workspaces[idx]?.gistId;
-    if(gid&&token){
-      setLoading(true);
-      gFetch(token,gid).then(its=>{setItems(its);setLoading(false);})
-        .catch(e=>{setGlobalErr(e.message);setLoading(false);});
-    }
+    if(gid&&token){setLoading(true);gFetch(token,gid).then(its=>{setItems(its);setLoading(false);}).catch(e=>{setGlobalErr(e.message);setLoading(false);});}
   }
 
   async function addWorkspace(){
@@ -461,63 +589,18 @@ function App(){
       const ws=[...workspaces,{name:newWsName.trim(),gistId:id}];
       const idx=ws.length-1;
       setWorkspaces(ws);setActiveIdx(idx);saveWorkspaces(ws,idx);
-      setItems([]);setFilter("unordered");setSearch("");
-      setShowWorkspaces(false);setNewWsName("");
+      setItems([]);setFilter("unordered");setSearch("");setShowWorkspaces(false);setNewWsName("");
     }catch(e){setNewWsErr(e.message);}
     finally{setNewWsBusy(false);}
   }
 
   function deleteWorkspace(idx){
-    if(!window.confirm(`確定刪除「${workspaces[idx].name}」？（只刪除本機記錄，Gist 資料不受影響）`))return;
+    if(!window.confirm(`確定刪除「${workspaces[idx].name}」？（只刪除本機記錄，Gist資料不受影響）`))return;
     const ws=workspaces.filter((_,i)=>i!==idx);
-    const newIdx=Math.min(activeIdx,ws.length-1);
+    const newIdx=Math.min(activeIdx,Math.max(0,ws.length-1));
     setWorkspaces(ws);setActiveIdx(newIdx);saveWorkspaces(ws,newIdx);
     if(ws.length===0){setSetupMode(true);setShowWorkspaces(false);}
     else switchWorkspace(newIdx);
-  }
-
-  function applyBatch(){
-    if(batchSel.size===0)return;
-    const updates={};
-    if(batchDate1)updates.firstOrderDate=batchDate1;
-    if(batchDate2)updates.secondOrderDate=batchDate2;
-    if(!Object.keys(updates).length)return;
-    setItems(prev=>{
-      const next=prev.map(it=>batchSel.has(it.id)?{...it,...updates}:it);
-      scheduleSave(next);return next;
-    });
-    setBatchSel(new Set());setBatchDate1("");setBatchDate2("");
-  }
-
-  function handleCSV(e){
-    const files=Array.from(e.target.files||[]);
-    if(!files.length)return;
-    Promise.all(files.map(file=>new Promise(resolve=>{
-      const reader=new FileReader();
-      reader.onload=ev=>resolve(parseCSV(ev.target.result));
-      reader.readAsText(file,"utf-8");
-    }))).then(results=>{
-      const aggMap={};
-      results.forEach(parsed=>{
-        parsed.forEach(p=>{
-          const k=itemKey(p);
-          if(aggMap[k])aggMap[k].qty+=p.qty;
-          else aggMap[k]={...p};
-        });
-      });
-      setItems(prev=>{
-        const ex={};prev.forEach(it=>{ex[itemKey(it)]=it;});
-        const merged=Object.values(aggMap).map(p=>{
-          const k=itemKey(p);
-          if(ex[k])return{...ex[k],qty:p.qty};
-          return{...p,id:genId(),importedAt:todayStr(),firstOrderDate:"",secondOrderDate:"",allOrdered:false,orderedQty:p.qty,arrivedQty:0,allArrived:false,arrivedTs:""};
-        });
-        const mk=new Set(merged.map(itemKey));
-        prev.forEach(it=>{if(!mk.has(itemKey(it)))merged.push(it);});
-        scheduleSave(merged);return merged;
-      });
-    });
-    e.target.value="";
   }
 
   function resetSetup(){
@@ -526,12 +609,28 @@ function App(){
     setToken("");setWorkspaces([]);setActiveIdx(0);setItems([]);setSetupMode(true);setShowSettings(false);setShowWorkspaces(false);
   }
 
+  function handleCSV(e){
+    const files=Array.from(e.target.files||[]);if(!files.length)return;
+    Promise.all(files.map(file=>new Promise(resolve=>{
+      const reader=new FileReader();
+      reader.onload=ev=>resolve(parseBakuCSV(ev.target.result));
+      reader.readAsText(file,"utf-8");
+    }))).then(results=>{
+      const aggMap={};
+      results.forEach(parsed=>{parsed.forEach(p=>{const k=itemKey(p);if(aggMap[k])aggMap[k].qty+=p.qty;else aggMap[k]={...p};});});
+      setItems(prev=>{
+        const ex={};prev.forEach(it=>{ex[itemKey(it)]=it;});
+        const merged=Object.values(aggMap).map(p=>{const k=itemKey(p);if(ex[k])return{...ex[k],qty:p.qty};return{...p,id:genId(),importedAt:todayStr(),firstOrderDate:"",secondOrderDate:"",allOrdered:false,orderedQty:p.qty,arrivedQty:0,allArrived:false,arrivedTs:"",firstArrivedTs:""};});
+        const mk=new Set(merged.map(itemKey));prev.forEach(it=>{if(!mk.has(itemKey(it)))merged.push(it);});
+        scheduleSave(merged);return merged;
+      });
+    });
+    e.target.value="";
+  }
+
   if(setupMode)return<Setup onDone={(t,g,name)=>{
-    setToken(t);
-    const ws=[{name:name||"第一場次",gistId:g}];
-    setWorkspaces(ws);setActiveIdx(0);saveWorkspaces(ws,0);
-    localStorage.setItem("st_token",t);
-    setSetupMode(false);
+    setToken(t);const ws=[{name:name||"第一場次",gistId:g}];setWorkspaces(ws);setActiveIdx(0);saveWorkspaces(ws,0);
+    localStorage.setItem("st_token",t);setSetupMode(false);
     gFetch(t,g).then(its=>setItems(its)).catch(e=>setGlobalErr(e.message));
   }}/>;
 
@@ -540,8 +639,7 @@ function App(){
     if(filter==="ordered")return!it.allArrived&&!!it.firstOrderDate;
     if(filter==="arrived")return it.allArrived;
     return true;
-  }).filter(it=>!search.trim()||it.product.includes(search.trim()))
-    .slice().sort((a,b)=>sortPri(a)-sortPri(b));
+  }).filter(it=>!search.trim()||it.product.includes(search.trim())).slice().sort((a,b)=>sortPri(a)-sortPri(b));
 
   const arrivedCount=items.filter(it=>it.allArrived).length;
   const late3Count=items.filter(isLateOrder).length;
@@ -549,58 +647,52 @@ function App(){
   const allSel=displayed.length>0&&displayed.every(it=>batchSel.has(it.id));
 
   return(
-    <div style={{background:C.bg,minHeight:"100vh",paddingBottom:batchSel.size>0?100:0}}>
+    <div style={{background:C.bg,minHeight:"100vh",paddingBottom:batchSel.size>0?220:0}}>
       {/* Header */}
       <div style={{background:C.surface,borderBottom:`1px solid ${C.line}`,position:"sticky",top:0,zIndex:10}}>
         <div style={{maxWidth:640,margin:"0 auto",padding:"10px 14px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
           <div>
             <div style={{color:C.stamp,fontWeight:700,fontSize:17}}>備貨追蹤</div>
-            <button onClick={()=>setShowWorkspaces(!showWorkspaces)}
+            <button onClick={()=>{setShowWorkspaces(!showWorkspaces);setShowSettings(false);}}
               style={{color:C.inkMuted,fontSize:12,background:"none",border:"none",padding:0,cursor:"pointer",display:"flex",alignItems:"center",gap:3}}>
               {workspaces[activeIdx]?.name||"場次"} <span style={{fontSize:10}}>▼</span>
             </button>
           </div>
-          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",justifyContent:"flex-end"}}>
+          <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",justifyContent:"flex-end"}}>
             {saving&&<span style={{color:C.inkMuted,fontSize:11}}>儲存中…</span>}
             {lastSaved&&!saving&&<span style={{color:C.inkMuted,fontSize:11}}>已儲存 {fmtSavedTime(lastSaved)}</span>}
-            <button onClick={()=>fileRef.current.click()}
-              style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:"pointer"}}>
-              匯入備貨清單
-            </button>
+            {!allocMode&&(
+              <button onClick={()=>fileRef.current.click()} style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:"pointer"}}>匯入備貨清單</button>
+            )}
             <input ref={fileRef} type="file" accept=".csv" multiple style={{display:"none"}} onChange={handleCSV}/>
-            <button onClick={()=>setShowSettings(!showSettings)}
+            <button onClick={()=>{setAllocMode(!allocMode);setShowWorkspaces(false);setShowSettings(false);}}
+              style={{background:allocMode?C.info:C.surface,color:allocMode?"#fff":C.inkMuted,border:`1px solid ${allocMode?C.info:C.line}`,borderRadius:8,padding:"7px 10px",fontSize:13,fontWeight:allocMode?"600":"400",cursor:"pointer"}}>
+              配貨
+            </button>
+            <button onClick={()=>{setShowSettings(!showSettings);setShowWorkspaces(false);}}
               style={{border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,borderRadius:8,padding:"7px 10px",fontSize:14,cursor:"pointer"}}>⚙</button>
           </div>
         </div>
 
-        {/* 場次切換面板 */}
         {showWorkspaces&&(
           <div style={{background:C.surface,borderTop:`1px solid ${C.line}`,padding:"12px 14px"}}>
             <div style={{maxWidth:640,margin:"0 auto"}}>
               <div style={{color:C.inkMuted,fontSize:11,marginBottom:8,fontWeight:600}}>切換場次</div>
               {workspaces.map((ws,i)=>(
-                <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
-                  <button onClick={()=>switchWorkspace(i)}
-                    style={{flex:1,textAlign:"left",background:i===activeIdx?C.infoSoft:C.stripe,
-                      color:i===activeIdx?C.info:C.ink,border:`1px solid ${i===activeIdx?C.info:C.line}`,
-                      borderRadius:8,padding:"8px 12px",fontSize:13,fontWeight:i===activeIdx?"600":"400",cursor:"pointer"}}>
+                <div key={i} style={{display:"flex",gap:6,marginBottom:6}}>
+                  <button onClick={()=>switchWorkspace(i)} style={{flex:1,textAlign:"left",background:i===activeIdx?C.infoSoft:C.stripe,color:i===activeIdx?C.info:C.ink,border:`1px solid ${i===activeIdx?C.info:C.line}`,borderRadius:8,padding:"8px 12px",fontSize:13,fontWeight:i===activeIdx?"600":"400",cursor:"pointer"}}>
                     {i===activeIdx?"▶ ":""}{ws.name}
                   </button>
-                  {workspaces.length>1&&(
-                    <button onClick={()=>deleteWorkspace(i)}
-                      style={{color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"6px 8px",fontSize:12,cursor:"pointer"}}>刪除</button>
-                  )}
+                  {workspaces.length>1&&<button onClick={()=>deleteWorkspace(i)} style={{color:C.inkMuted,border:`1px solid ${C.line}`,background:C.surface,borderRadius:6,padding:"6px 8px",fontSize:12,cursor:"pointer"}}>刪除</button>}
                 </div>
               ))}
               <div style={{borderTop:`1px solid ${C.line}`,marginTop:10,paddingTop:10}}>
                 <div style={{color:C.inkMuted,fontSize:11,marginBottom:6,fontWeight:600}}>新增場次</div>
                 <div style={{display:"flex",gap:6}}>
-                  <input type="text" value={newWsName} onChange={e=>setNewWsName(e.target.value)}
-                    placeholder="場次名稱，例如：0630直播"
+                  <input type="text" value={newWsName} onChange={e=>setNewWsName(e.target.value)} placeholder="場次名稱，例如：0630直播"
                     style={{flex:1,border:`1px solid ${C.line}`,borderRadius:8,padding:"7px 10px",fontSize:13}}/>
                   <button onClick={addWorkspace} disabled={!newWsName.trim()||newWsBusy}
-                    style={{background:newWsName.trim()&&!newWsBusy?C.stamp:"#ccc",color:"#fff",border:"none",
-                      borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,cursor:newWsName.trim()&&!newWsBusy?"pointer":"default",whiteSpace:"nowrap"}}>
+                    style={{background:newWsName.trim()&&!newWsBusy?C.stamp:"#ccc",color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:13,fontWeight:600,cursor:newWsName.trim()&&!newWsBusy?"pointer":"default",whiteSpace:"nowrap"}}>
                     {newWsBusy?"建立中…":"新增"}
                   </button>
                 </div>
@@ -614,143 +706,110 @@ function App(){
           <div style={{background:C.stripe,borderTop:`1px solid ${C.line}`,padding:"10px 14px",fontSize:12,color:C.inkMuted}}>
             <div style={{maxWidth:640,margin:"0 auto",display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
               <span>Gist ID：<code style={{fontSize:11,color:C.ink}}>{gistId}</code></span>
-              <button onClick={()=>{try{navigator.clipboard.writeText(gistId);}catch{}}}
-                style={{border:`1px solid ${C.line}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>複製</button>
-              <button onClick={resetSetup}
-                style={{color:C.stamp,border:`1px solid ${C.stamp}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>重置所有設定</button>
+              <button onClick={()=>{try{navigator.clipboard.writeText(gistId);}catch{}}} style={{border:`1px solid ${C.line}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>複製</button>
+              <button onClick={resetSetup} style={{color:C.stamp,border:`1px solid ${C.stamp}`,padding:"2px 8px",borderRadius:6,cursor:"pointer"}}>重置所有設定</button>
             </div>
           </div>
         )}
       </div>
 
-      <div style={{maxWidth:640,margin:"0 auto",padding:"14px 14px"}}>
-        {globalErr&&(
-          <div style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:10,padding:"8px 12px",marginBottom:12,fontSize:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-            <span>{globalErr}</span>
-            <button onClick={()=>setGlobalErr("")} style={{marginLeft:8,textDecoration:"underline",cursor:"pointer"}}>關閉</button>
-          </div>
-        )}
+      {/* 配貨模式 */}
+      {allocMode&&<AllocationView items={items} onClose={()=>setAllocMode(false)}/>}
 
-        {/* Stats */}
-        <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
-          <span style={{color:C.ink,fontSize:14}}>
-            已到貨 <strong style={{color:C.success}}>{arrivedCount}</strong> / {items.length} 筆
-          </span>
-          {late3Count>0&&<span style={{background:C.orangeSoft,color:C.orange,border:`1px solid ${C.orange}`,borderRadius:20,padding:"2px 10px",fontSize:11}}>⚠ {late3Count} 筆逾3天未訂</span>}
-          {late14Count>0&&<span style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:20,padding:"2px 10px",fontSize:11}}>🚨 {late14Count} 筆逾14天未到</span>}
-          <div style={{display:"flex",gap:4,marginLeft:"auto"}}>
-            {[["unordered","未訂貨"],["ordered","已訂待到"],["arrived","已到貨"]].map(([v,l])=>(
-              <button key={v} onClick={()=>setFilter(v)}
-                style={{background:filter===v?C.stamp:C.surface,color:filter===v?"#fff":C.inkMuted,border:`1px solid ${filter===v?C.stamp:C.line}`,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>
-                {l}
-              </button>
-            ))}
+      {/* 追蹤模式 */}
+      {!allocMode&&(
+        <div style={{maxWidth:640,margin:"0 auto",padding:"14px 14px"}}>
+          {globalErr&&(
+            <div style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:10,padding:"8px 12px",marginBottom:12,fontSize:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span>{globalErr}</span>
+              <button onClick={()=>setGlobalErr("")} style={{marginLeft:8,textDecoration:"underline",cursor:"pointer"}}>關閉</button>
+            </div>
+          )}
+          {/* Stats */}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,flexWrap:"wrap"}}>
+            <span style={{color:C.ink,fontSize:14}}>已到貨 <strong style={{color:C.success}}>{arrivedCount}</strong> / {items.length} 筆</span>
+            {late3Count>0&&<span style={{background:C.orangeSoft,color:C.orange,border:`1px solid ${C.orange}`,borderRadius:20,padding:"2px 10px",fontSize:11}}>⚠ {late3Count} 筆逾3天未訂</span>}
+            {late14Count>0&&<span style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:20,padding:"2px 10px",fontSize:11}}>🚨 {late14Count} 筆逾14天未到</span>}
+            <div style={{display:"flex",gap:4,marginLeft:"auto"}}>
+              {[["unordered","未訂貨"],["ordered","已訂待到"],["arrived","已到貨"]].map(([v,l])=>(
+                <button key={v} onClick={()=>setFilter(v)} style={{background:filter===v?C.stamp:C.surface,color:filter===v?"#fff":C.inkMuted,border:`1px solid ${filter===v?C.stamp:C.line}`,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>{l}</button>
+              ))}
+            </div>
           </div>
+          {/* 搜尋 */}
+          <div style={{position:"relative",marginBottom:10}}>
+            <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:C.inkMuted,fontSize:16,pointerEvents:"none"}}>🔍</span>
+            <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="搜尋商品名稱"
+              style={{width:"100%",border:`1px solid ${search?C.info:C.line}`,borderRadius:10,padding:"9px 36px 9px 34px",fontSize:14,background:C.surface,color:C.ink,boxSizing:"border-box"}}/>
+            {search&&<button onClick={()=>setSearch("")} style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.inkMuted,fontSize:18,background:"none",border:"none",cursor:"pointer"}}>×</button>}
+          </div>
+          {search&&displayed.length>0&&<div style={{color:C.info,fontSize:12,marginBottom:8}}>找到 {displayed.length} 筆</div>}
+          {/* 批次全選列 */}
+          {displayed.length>0&&(
+            <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:10,padding:"10px 14px",marginBottom:10,display:"flex",alignItems:"center",gap:10}}>
+              <input type="checkbox" checked={allSel}
+                onChange={e=>{if(e.target.checked)setBatchSel(new Set([...batchSel,...displayed.map(it=>it.id)]));else setBatchSel(prev=>{const n=new Set(prev);displayed.forEach(it=>n.delete(it.id));return n;});}}
+                style={{width:22,height:22,accentColor:C.info,cursor:"pointer"}}/>
+              <span style={{color:C.inkMuted,fontSize:14}}>
+                {batchSel.size>0?<strong style={{color:C.info}}>已選 {batchSel.size} 筆</strong>:"全選"}
+              </span>
+              {batchSel.size>0&&<span style={{color:C.inkMuted,fontSize:12}}>— 在下方設定日期後按套用</span>}
+            </div>
+          )}
+          {/* 商品列表 */}
+          {loading?(
+            <div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>
+          ):items.length===0?(
+            <div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}>
+              <div style={{fontSize:36,marginBottom:12}}>📦</div>
+              <div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div>
+              <div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的CSV</div>
+            </div>
+          ):displayed.length===0?(
+            <div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>
+          ):(
+            displayed.map((it,idx)=>{
+              const prev=displayed[idx-1];
+              const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));
+              return(
+                <React.Fragment key={it.id}>
+                  {showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}
+                  <ItemCard it={it} sel={batchSel.has(it.id)}
+                    onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})}
+                    onUpdate={(field,value)=>updateField(it.id,field,value)}/>
+                </React.Fragment>
+              );
+            })
+          )}
         </div>
+      )}
 
-        {/* 搜尋 */}
-        <div style={{position:"relative",marginBottom:10}}>
-          <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",color:C.inkMuted,fontSize:16,pointerEvents:"none"}}>🔍</span>
-          <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="搜尋商品名稱"
-            style={{width:"100%",border:`1px solid ${search?C.info:C.line}`,borderRadius:10,padding:"9px 36px 9px 34px",fontSize:14,background:C.surface,color:C.ink,boxSizing:"border-box"}}/>
-          {search&&<button onClick={()=>setSearch("")}
-            style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.inkMuted,fontSize:18,background:"none",border:"none",cursor:"pointer"}}>×</button>}
-        </div>
-        {search&&displayed.length>0&&(
-          <div style={{color:C.info,fontSize:12,marginBottom:8}}>找到 {displayed.length} 筆 ——勾選後可批次設訂購日</div>
-        )}
-
-        {/* 批次工具列（上方只顯示全選） */}
-        {displayed.length>0&&(
-          <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:10,padding:"10px 14px",marginBottom:10,display:"flex",alignItems:"center",gap:10}}>
-            <input type="checkbox" checked={allSel}
-              onChange={e=>{
-                if(e.target.checked)setBatchSel(new Set([...batchSel,...displayed.map(it=>it.id)]));
-                else setBatchSel(prev=>{const n=new Set(prev);displayed.forEach(it=>n.delete(it.id));return n;});
-              }}
-              style={{width:22,height:22,accentColor:C.info,cursor:"pointer"}}/>
-            <span style={{color:C.inkMuted,fontSize:14}}>
-              {batchSel.size>0?<strong style={{color:C.info}}>已選 {batchSel.size} 筆</strong>:"全選"}
-            </span>
-            {batchSel.size>0&&(
-              <span style={{color:C.inkMuted,fontSize:12}}>— 在下方設定日期後按套用</span>
-            )}
-          </div>
-        )}
-
-        {loading?(
-          <div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>
-        ):items.length===0?(
-          <div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}>
-            <div style={{fontSize:36,marginBottom:12}}>📦</div>
-            <div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div>
-            <div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的 CSV</div>
-          </div>
-        ):displayed.length===0?(
-          <div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>
-            這個分類目前沒有資料
-          </div>
-        ):(
-          displayed.map((it,idx)=>{
-            const prev=displayed[idx-1];
-            const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));
-            return(
-              <React.Fragment key={it.id}>
-                {showDivider&&(
-                  <div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12,letterSpacing:0.3}}>
-                    {GROUP_LABEL[sortPri(it)]}
-                  </div>
-                )}
-                <ItemCard it={it} sel={batchSel.has(it.id)}
-                  onToggleSel={()=>{
-                    setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;});
-                  }}
-                  onUpdate={(field,value)=>updateField(it.id,field,value)}/>
-              </React.Fragment>
-            );
-          })
-        )}
-      </div>
-
-      {/* 批次操作底部列 */}
-      {batchSel.size>0&&(
+      {/* 批次底部列 */}
+      {batchSel.size>0&&!allocMode&&(
         <div style={{position:"fixed",bottom:0,left:0,right:0,background:C.ink,zIndex:50,padding:"14px 16px",boxShadow:"0 -4px 20px rgba(0,0,0,0.3)"}}>
           <div style={{maxWidth:640,margin:"0 auto"}}>
-            <div style={{color:"rgba(255,255,255,0.7)",fontSize:12,marginBottom:10}}>
-              已選 <strong style={{color:"#fff"}}>{batchSel.size}</strong> 筆
-            </div>
+            <div style={{color:"rgba(255,255,255,0.7)",fontSize:12,marginBottom:10}}>已選 <strong style={{color:"#fff"}}>{batchSel.size}</strong> 筆，設定訂購日後按套用</div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
-              {/* 首次訂購日 */}
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 <span style={{color:"rgba(255,255,255,0.7)",fontSize:12,width:60,flexShrink:0}}>首次訂購日</span>
                 <input type="date" value={batchDate1} onChange={e=>setBatchDate1(e.target.value)}
-                  style={{flex:1,background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"7px 8px",fontSize:14,color:"#fff",minWidth:0}}/>
-                <button onClick={()=>{
-                  setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,firstOrderDate:batchDate1}:it);scheduleSave(next);return next;});
-                  setBatchDate1("");
-                }} style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:"pointer",flexShrink:0}}>套用</button>
-                <button onClick={()=>{
-                  setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,firstOrderDate:""}:it);scheduleSave(next);return next;});
-                }} style={{background:"rgba(255,255,255,0.12)",color:"rgba(255,255,255,0.7)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:8,padding:"7px 10px",fontSize:13,cursor:"pointer",flexShrink:0}}>清除</button>
+                  style={{flex:1,background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"8px 10px",fontSize:14,color:"#fff"}}/>
+                <button onClick={()=>{setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,firstOrderDate:batchDate1}:it);scheduleSave(next);return next;});setBatchDate1("");}}
+                  style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"8px 12px",fontSize:13,fontWeight:600,cursor:"pointer",flexShrink:0}}>套用</button>
+                <button onClick={()=>{setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,firstOrderDate:""}:it);scheduleSave(next);return next;});}}
+                  style={{background:"rgba(255,255,255,0.12)",color:"rgba(255,255,255,0.7)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:8,padding:"8px 10px",fontSize:12,cursor:"pointer",flexShrink:0}}>清除</button>
               </div>
-              {/* 二次訂購日 */}
               <div style={{display:"flex",alignItems:"center",gap:6}}>
                 <span style={{color:"rgba(255,255,255,0.7)",fontSize:12,width:60,flexShrink:0}}>二次訂購日</span>
                 <input type="date" value={batchDate2} onChange={e=>setBatchDate2(e.target.value)}
-                  style={{flex:1,background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"7px 8px",fontSize:14,color:"#fff",minWidth:0}}/>
-                <button onClick={()=>{
-                  setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,secondOrderDate:batchDate2}:it);scheduleSave(next);return next;});
-                  setBatchDate2("");
-                }} style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"7px 12px",fontSize:13,fontWeight:600,cursor:"pointer",flexShrink:0}}>套用</button>
-                <button onClick={()=>{
-                  setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,secondOrderDate:""}:it);scheduleSave(next);return next;});
-                }} style={{background:"rgba(255,255,255,0.12)",color:"rgba(255,255,255,0.7)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:8,padding:"7px 10px",fontSize:13,cursor:"pointer",flexShrink:0}}>清除</button>
+                  style={{flex:1,background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:8,padding:"8px 10px",fontSize:14,color:"#fff"}}/>
+                <button onClick={()=>{setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,secondOrderDate:batchDate2}:it);scheduleSave(next);return next;});setBatchDate2("");}}
+                  style={{background:C.stamp,color:"#fff",border:"none",borderRadius:8,padding:"8px 12px",fontSize:13,fontWeight:600,cursor:"pointer",flexShrink:0}}>套用</button>
+                <button onClick={()=>{setItems(prev=>{const next=prev.map(it=>batchSel.has(it.id)?{...it,secondOrderDate:""}:it);scheduleSave(next);return next;});}}
+                  style={{background:"rgba(255,255,255,0.12)",color:"rgba(255,255,255,0.7)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:8,padding:"8px 10px",fontSize:12,cursor:"pointer",flexShrink:0}}>清除</button>
               </div>
-              {/* 取消選取 */}
               <button onClick={()=>{setBatchSel(new Set());setBatchDate1("");setBatchDate2("");}}
-                style={{background:"transparent",color:"rgba(255,255,255,0.5)",border:"none",padding:"4px",fontSize:13,cursor:"pointer",textAlign:"center"}}>
-                取消選取
-              </button>
+                style={{background:"transparent",color:"rgba(255,255,255,0.5)",border:"none",padding:"4px",fontSize:13,cursor:"pointer",textAlign:"center"}}>取消選取</button>
             </div>
           </div>
         </div>
@@ -763,7 +822,7 @@ try{
   const root=ReactDOM.createRoot(document.getElementById("root"));
   root.render(<App/>);
 }catch(err){
-  document.body.innerHTML='<div style="white-space:pre-wrap;padding:20px;color:#b91c1c;font-family:monospace;font-size:13px;">Render 錯誤：\n'+(err&&err.stack?err.stack:String(err))+'</div>';
+  document.body.innerHTML='<div style="white-space:pre-wrap;padding:20px;color:#b91c1c;font-family:monospace;font-size:13px;">Render錯誤：\n'+(err&&err.stack?err.stack:String(err))+'</div>';
 }
 </script>
 </body>
