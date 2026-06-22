@@ -106,7 +106,7 @@ function migrateItem(it){
     firstOrderDate: it.firstOrderDate||it.supplierOrderDate||"",
     secondOrderDate: it.secondOrderDate||"",
     allOrdered: it.allOrdered||false,
-    arrivedQty: it.arrivedQty!=null?it.arrivedQty:(it.arrived?it.qty:0),
+    orderedQty: it.orderedQty!=null?it.orderedQty:it.qty,
     allArrived: it.allArrived||it.arrived||false,
     arrivedTs: it.arrivedTs||"",
     importedAt: it.importedAt||it.orderDate||todayStr(),
@@ -218,8 +218,9 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
   if(sel&&!it.allArrived){borderColor=C.info;}
 
   function handleArrivedQty(val){
-    const n=Math.max(0,Math.min(it.qty,parseInt(val,10)||0));
-    const nowFull=n>=it.qty;
+    const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;
+    const n=Math.max(0,parseInt(val,10)||0);
+    const nowFull=n>=maxQ;
     onUpdate("arrivedQty",n);
     if(nowFull&&!it.allArrived){
       onUpdate("allArrived",true);
@@ -227,10 +228,11 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
     }
   }
   function handleAllArrived(checked){
+    const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;
     onUpdate("allArrived",checked);
     if(checked){
       if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());
-      if(!it.arrivedQty||it.arrivedQty<it.qty)onUpdate("arrivedQty",it.qty);
+      if(!it.arrivedQty||it.arrivedQty<maxQ)onUpdate("arrivedQty",maxQ);
     }else{
       onUpdate("arrivedTs","");
     }
@@ -257,9 +259,14 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
             <span style={{color:it.allArrived?C.success:C.ink,fontWeight:700,fontSize:15}}>
               {it.product}
             </span>
-            <span style={{background:C.stripe,color:C.inkMuted,borderRadius:20,padding:"2px 10px",fontSize:12,flexShrink:0,fontWeight:600}}>
-              x{it.qty}
-            </span>
+            <div style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
+              <span style={{color:C.inkMuted,fontSize:11}}>需求</span>
+              <span style={{background:C.stripe,color:C.inkMuted,borderRadius:20,padding:"2px 8px",fontSize:12}}>x{it.qty}</span>
+              <span style={{color:C.inkMuted,fontSize:11}}>訂購</span>
+              <input type="number" min="0" value={it.orderedQty!=null?it.orderedQty:it.qty}
+                onChange={e=>onUpdate("orderedQty",Math.max(0,parseInt(e.target.value,10)||0))}
+                style={{width:52,border:`1px solid ${C.info}`,borderRadius:8,padding:"2px 6px",fontSize:13,textAlign:"center",background:"#EFF6FC",color:C.info,fontWeight:600}}/>
+            </div>
           </div>
           {(it.color||it.size||it.style)&&(
             <div style={{color:C.inkMuted,fontSize:12,marginTop:2}}>
@@ -299,10 +306,10 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
         <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
           <div style={{display:"flex",alignItems:"center",gap:6}}>
             <span style={{color:C.inkMuted,fontSize:12,whiteSpace:"nowrap"}}>已到貨</span>
-            <input type="number" min="0" max={it.qty} value={it.arrivedQty||0}
+            <input type="number" min="0" value={it.arrivedQty||0}
               onChange={e=>handleArrivedQty(e.target.value)}
               style={{width:52,border:`1px solid ${C.line}`,borderRadius:8,padding:"5px 6px",fontSize:14,textAlign:"center",background:C.bg,color:C.ink}}/>
-            <span style={{color:C.inkMuted,fontSize:12,whiteSpace:"nowrap"}}>/ {it.qty} 件</span>
+            <span style={{color:C.inkMuted,fontSize:12,whiteSpace:"nowrap"}}>/ {it.orderedQty!=null?it.orderedQty:it.qty} 件</span>
           </div>
           <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
             <input type="checkbox" checked={!!it.allArrived} onChange={e=>handleAllArrived(e.target.checked)}
@@ -317,7 +324,7 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
         </div>
         {it.arrivedQty>0&&!it.allArrived&&(
           <div style={{color:C.orange,fontSize:11,marginTop:4}}>
-            ⚡ 部分到貨：{it.arrivedQty}/{it.qty} 件
+            ⚡ 部分到貨：{it.arrivedQty}/{it.orderedQty!=null?it.orderedQty:it.qty} 件
           </div>
         )}
       </div>
@@ -411,7 +418,7 @@ function App(){
         const merged=Object.values(aggMap).map(p=>{
           const k=itemKey(p);
           if(ex[k])return{...ex[k],qty:p.qty};
-          return{...p,id:genId(),importedAt:todayStr(),firstOrderDate:"",secondOrderDate:"",allOrdered:false,arrivedQty:0,allArrived:false,arrivedTs:""};
+          return{...p,id:genId(),importedAt:todayStr(),firstOrderDate:"",secondOrderDate:"",allOrdered:false,orderedQty:p.qty,arrivedQty:0,allArrived:false,arrivedTs:""};
         });
         const mk=new Set(merged.map(itemKey));
         prev.forEach(it=>{if(!mk.has(itemKey(it)))merged.push(it);});
