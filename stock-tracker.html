@@ -67,7 +67,8 @@ function normalizeStr(s){return String(s||"").replace(/\s+/g," ").trim();}
 function parseAllocSpec(raw){
   const s=normalizeStr(raw).replace(/^規格選擇[:：]\s*/,"");
   if(!s)return{color:"",size:"",style:""};
-  const segs=s.split("/").map(x=>x.trim()).filter(Boolean);
+  // 只在「/後面緊接中文字」的地方切，避免把 S/90-100 裡的斜線也切掉
+  const segs=s.split(/\/(?=[\u4e00-\u9fff])/).map(x=>x.trim()).filter(Boolean);
   const colors=[],sizes=[],extras=[];
   segs.forEach(seg=>{const m=seg.match(/^(.+?)[:：](.+)$/);if(m){const k=m[1].trim(),v=m[2].trim();if(k.includes("顏色"))colors.push(v);else if(["尺寸","尺碼","身高","體重","全尺碼"].some(x=>k.includes(x)))sizes.push(v);else extras.push(`${k}:${v}`);}else extras.push(seg);});
   return{color:colors.join("/"),size:sizes.join("/"),style:extras.join("；")};
