@@ -280,13 +280,25 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
       <div style={{display:"flex",gap:8,marginBottom:10,paddingLeft:32}}>
         <div style={{flex:1}}>
           <div style={{color:C.inkMuted,fontSize:11,marginBottom:4}}>首次訂購日</div>
-          <input type="date" value={it.firstOrderDate||""} onChange={e=>onUpdate("firstOrderDate",e.target.value)}
-            style={{width:"100%",border:`1px solid ${C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:C.ink,background:C.bg}}/>
+          <div style={{display:"flex",alignItems:"center",gap:4}}>
+            <input type="date" value={it.firstOrderDate||""} onChange={e=>onUpdate("firstOrderDate",e.target.value)}
+              style={{flex:1,border:`1px solid ${C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:C.ink,background:C.bg,minWidth:0}}/>
+            {it.firstOrderDate&&(
+              <button onClick={()=>onUpdate("firstOrderDate","")}
+                style={{flexShrink:0,width:26,height:26,borderRadius:6,border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>×</button>
+            )}
+          </div>
         </div>
         <div style={{flex:1}}>
           <div style={{color:C.inkMuted,fontSize:11,marginBottom:4}}>二次訂購日<span style={{color:C.inkMuted,fontSize:10}}> （選填）</span></div>
-          <input type="date" value={it.secondOrderDate||""} onChange={e=>onUpdate("secondOrderDate",e.target.value)}
-            style={{width:"100%",border:`1px solid ${C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:C.ink,background:C.bg}}/>
+          <div style={{display:"flex",alignItems:"center",gap:4}}>
+            <input type="date" value={it.secondOrderDate||""} onChange={e=>onUpdate("secondOrderDate",e.target.value)}
+              style={{flex:1,border:`1px solid ${C.line}`,borderRadius:8,padding:"6px 8px",fontSize:13,color:C.ink,background:C.bg,minWidth:0}}/>
+            {it.secondOrderDate&&(
+              <button onClick={()=>onUpdate("secondOrderDate","")}
+                style={{flexShrink:0,width:26,height:26,borderRadius:6,border:`1px solid ${C.line}`,background:C.surface,color:C.inkMuted,fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1}}>×</button>
+            )}
+          </div>
         </div>
       </div>
 
