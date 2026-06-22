@@ -453,9 +453,16 @@ function AllocationView({items,onClose}){
       </div>
 
       {!results&&(
-        <div style={{background:C.infoSoft,border:`1px solid ${C.info}`,borderRadius:12,padding:14,fontSize:12,color:C.info,lineHeight:1.7}}>
-          配貨邏輯：同一件商品，訂單金額較高的客人優先分配到現有庫存。庫存不足時，金額較低的客人會列為「待補貨」，等下一批到貨再處理。
-        </div>
+        <>
+          {items.filter(it=>it.arrivedQty>0).length===0&&items.length>0&&(
+            <div style={{background:C.warningSoft,border:`1px solid ${C.warning}`,borderRadius:12,padding:14,fontSize:12,color:C.warning,marginBottom:12}}>
+              ⚠ 目前追蹤器裡的所有商品「已到貨」件數都是 0，配貨結果會是空的。請先回到備貨追蹤頁面，把已到貨的件數填好，再來跑配貨。
+            </div>
+          )}
+          <div style={{background:C.infoSoft,border:`1px solid ${C.info}`,borderRadius:12,padding:14,fontSize:12,color:C.info,lineHeight:1.7}}>
+            配貨邏輯：同一件商品，訂單金額較高的客人優先分配到現有庫存。庫存不足時，金額較低的客人會列為「待補貨」，等下一批到貨再處理。
+          </div>
+        </>
       )}
 
       {results&&(
@@ -486,19 +493,19 @@ function AllocationView({items,onClose}){
                 </div>
                 {c.allocated.length>0&&(
                   <div style={{marginBottom:c.waiting.length>0?8:0}}>
-                    <div style={{fontSize:11,color:C.success,fontWeight:600,marginBottom:4}}>✅ 可出貨</div>
+                    <div style={{fontSize:11,color:C.success,fontWeight:700,marginBottom:4}}>✅ 可出貨</div>
                     {c.allocated.map((it,i)=>(
-                      <div key={i} style={{fontSize:13,color:C.ink,padding:"2px 0"}}>
-                        {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
+                      <div key={i} style={{fontSize:13,color:C.success,background:C.successSoft,borderRadius:6,padding:"4px 8px",marginBottom:3,fontWeight:500}}>
+                        {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} <strong>× {it.qty}</strong>
                       </div>
                     ))}
                   </div>
                 )}
                 {c.waiting.length>0&&(
                   <div>
-                    <div style={{fontSize:11,color:C.orange,fontWeight:600,marginBottom:4}}>⏳ 待補貨</div>
+                    <div style={{fontSize:11,color:C.orange,fontWeight:700,marginBottom:4}}>⏳ 待補貨</div>
                     {c.waiting.map((it,i)=>(
-                      <div key={i} style={{fontSize:13,color:C.inkMuted,padding:"2px 0"}}>
+                      <div key={i} style={{fontSize:13,color:C.orange,background:C.orangeSoft,borderRadius:6,padding:"4px 8px",marginBottom:3}}>
                         {[it.product,it.color,it.size,it.style].filter(Boolean).join(" ")} × {it.qty}
                       </div>
                     ))}
