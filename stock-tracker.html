@@ -338,7 +338,7 @@ function App(){
   const[gistId,setGistId]=useState(()=>localStorage.getItem("st_gist_id")||"");
   const[setupMode,setSetupMode]=useState(!localStorage.getItem("st_gist_id"));
   const[items,setItems]=useState([]);
-  const[filter,setFilter]=useState("all");
+  const[filter,setFilter]=useState("unordered");
   const[search,setSearch]=useState("");
   const[loading,setLoading]=useState(false);
   const[saving,setSaving]=useState(false);
@@ -439,8 +439,9 @@ function App(){
   }}/>;
 
   const displayed=items.filter(it=>{
+    if(filter==="unordered")return!it.allArrived&&!it.firstOrderDate&&!it.allOrdered;
+    if(filter==="ordered")return!it.allArrived&&(it.firstOrderDate||it.allOrdered);
     if(filter==="arrived")return it.allArrived;
-    if(filter==="pending")return!it.allArrived;
     return true;
   }).filter(it=>!search.trim()||it.product.includes(search.trim()))
     .slice().sort((a,b)=>sortPri(a)-sortPri(b));
@@ -500,7 +501,7 @@ function App(){
           {late3Count>0&&<span style={{background:C.orangeSoft,color:C.orange,border:`1px solid ${C.orange}`,borderRadius:20,padding:"2px 10px",fontSize:11}}>⚠ {late3Count} 筆逾3天未訂</span>}
           {late14Count>0&&<span style={{background:C.warningSoft,color:C.warning,border:`1px solid ${C.warning}`,borderRadius:20,padding:"2px 10px",fontSize:11}}>🚨 {late14Count} 筆逾14天未到</span>}
           <div style={{display:"flex",gap:4,marginLeft:"auto"}}>
-            {[["all","全部"],["pending","待到貨"],["arrived","已到貨"]].map(([v,l])=>(
+            {[["unordered","未訂貨"],["ordered","已訂待到"],["arrived","已到貨"]].map(([v,l])=>(
               <button key={v} onClick={()=>setFilter(v)}
                 style={{background:filter===v?C.stamp:C.surface,color:filter===v?"#fff":C.inkMuted,border:`1px solid ${filter===v?C.stamp:C.line}`,borderRadius:8,padding:"5px 10px",fontSize:12,cursor:"pointer"}}>
                 {l}
