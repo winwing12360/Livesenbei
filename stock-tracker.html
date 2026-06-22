@@ -364,10 +364,9 @@ function AllocationView({items,savedAlloc,onClose,onSaveAlloc,onConfirmShipment}
   },[allocMethod]);
 
   function recompute(parsed,method){
-    const base=method==="proportional"?computeProportionalAlloc(parsed,items):computeAlloc(parsed,items);
-    // 保留已出貨記錄
-    if(editAlloc){Object.keys(base).forEach(k=>{if(editAlloc[k]?.shippedAt){base[k].shippedAt=editAlloc[k].shippedAt;base[k].shippedOrderNo=editAlloc[k].shippedOrderNo;}});}
-    setEditAlloc(base);onSaveAlloc(base);
+    // 用 recalculateAlloc 確保已出貨訂單（含 shipments 陣列）完整保留
+    const next=recalculateAlloc(editAlloc||{},parsed,items,method);
+    setEditAlloc(next);onSaveAlloc(next);
   }
 
   // 計算每個SKU的可用庫存（arrivedQty - shippedQty）
