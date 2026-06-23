@@ -40,12 +40,17 @@ function itemKey(it){return[it.product,it.color,it.size,it.style].join("|||");}
 // 正規化 key：把 / 和多餘空白統一，用於跨 CSV 格式比對
 function nkStr(s){return String(s||"").replace(/｜/g,"|").replace(/\//g," ").replace(/\s+/g," ").trim().toLowerCase();}
 function normalizedKey(it){return[it.product,it.color,it.size,it.style].map(nkStr).join("|||");}
-// flatKey：終極模糊比對，移除顏色/尺寸標籤與所有符號後比對
+// flatKey：終極模糊比對；style 去括號後比對，避免選項在括號內被省略
 function flatKey(it){
-  return[it.product,it.color,it.size,it.style].join(" ")
-    .replace(/顏色[:：]|尺寸[:：]|尺碼[:：]|身高[:：]|體重[:：]|規格[:：]|款式[:：]/g,"")
-    .replace(/[｜|\//:：\s\-·（）()【】　、。]/g,"")
+  const ns=s=>String(s||"")
+    .replace(/女裝顏色[:：]|男裝顏色[:：]|顏色[:：]|女裝尺寸[:：]|男裝尺寸[:：]|兒童尺寸[:：]|尺寸[:：]|尺碼[:：]|身高[:：]|體重[:：]|規格[:：]|款式[:：]/g,"")
+    .replace(/[｜|\/_:：\s\-·（）()【】\u3000\u3001\u3002＊＋]/g,"")
     .toLowerCase();
+  const p=ns(it.product),c=ns(it.color),z=ns(it.size),st=ns(it.style);
+  // 去掉括號內選項後再比對：若 style 只在括號選項裡（如天絲/小腰），仍須保留
+  const pNoParens=ns(String(it.product||"").replace(/[（(][^）)]*[）)]/g,""));
+  const stAdd=st&&!pNoParens.includes(st)?st:"";
+  return p+c+z+stAdd;
 }
 function todayStr(){return new Date().toISOString().slice(0,10);}
 function fmtSavedTime(d){if(!d)return"";return`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;}
@@ -318,6 +323,13 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
     if(nowFull&&!it.allArrived){onUpdate("allArrived",true);if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());}
   }
   function handleAllArrived(checked){
+    const label=[it.product,it.color,it.size,it.style].filter(Boolean).join(" ");
+    const maxQ2=it.orderedQty!=null?it.orderedQty:it.qty;
+    if(checked){
+      if(!window.confirm(`確認「${label}」共 ${maxQ2} 件全數到貨？\n點確定後到貨數量會自動填入 ${maxQ2} 件。`))return;
+    }else{
+      if(!window.confirm(`取消「${label}」的全數到貨？`))return;
+    }
     const maxQ=it.orderedQty!=null?it.orderedQty:it.qty;onUpdate("allArrived",checked);
     if(checked){if(!it.arrivedTs)onUpdate("arrivedTs",new Date().toISOString());if(!it.arrivedQty||it.arrivedQty<maxQ)onUpdate("arrivedQty",maxQ);if(!it.firstArrivedTs)onUpdate("firstArrivedTs",new Date().toISOString());}
     else{onUpdate("arrivedTs","");}
@@ -368,7 +380,7 @@ function ItemCard({it,sel,onToggleSel,onUpdate}){
             <span style={{color:C.inkMuted,fontSize:12}}>/ {it.orderedQty!=null?it.orderedQty:it.qty} 件</span>
           </div>
           <label style={{display:"flex",alignItems:"center",gap:6,cursor:"pointer"}}>
-            <input type="checkbox" checked={!!it.allArrived} onChange={e=>handleAllArrived(e.target.checked)} style={{width:22,height:22,accentColor:C.success,cursor:"pointer"}}/>
+            <input type="checkbox" checked={!!it.allArrived} onChange={e=>handleAllArrived(e.target.checked)} style={{width:26,height:26,cursor:"pointer",accentColor:C.success}}/>
             <span style={{fontSize:13,color:it.allArrived?C.success:C.inkMuted,fontWeight:it.allArrived?"600":"400"}}>{it.allArrived?"✅ 全數到貨":"全數到貨"}</span>
           </label>
           {it.arrivedTs&&<span style={{color:C.success,fontSize:11}}>{fmtTs(it.arrivedTs)}</span>}
