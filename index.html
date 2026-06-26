@@ -974,9 +974,20 @@ function LiveOrderSorter() {
     const imageUrl = iopenImageUrl.trim();
     const selected = customerOrderTotals.filter((c, idx) => iopenSelected.has(iopenKey(c, idx)));
 
+    // 規格行（連結到主商品，只需最少欄位）
+    function buildSpecRow(sku, mainSku, specName, specValue, price) {
+      return [
+        "", 0, 0, "", "", sku,
+        "", price, "", "",
+        mainSku, specName, specValue, "", "",
+        "", "", "", "", "", "", "", "", "", "", "",
+        "", "", "", "", "", "", "",
+        1, "",
+      ];
+    }
     function buildRow(c, sku, mainSku, specName, specValue, price, desc) {
       return [
-        "", 3, 0, c.account || c.name, categoryCode, sku,
+        "", 3, 0, `直播｜（${c.account || c.name}）`, categoryCode, sku,
         "", price, "", 1,
         mainSku, specName, specValue, "", "",
         imageUrl, "", "", "", "", "", "", "", "", "", "",
@@ -993,8 +1004,10 @@ function LiveOrderSorter() {
         const [small, big] = splitForCoupons(c.amount);
         const skuA = `${baseSku}-A`;
         const skuB = `${baseSku}-B`;
-        rows.push(buildRow(c, skuA, skuA, "金額方案", `$${small}`, small, desc));
-        rows.push(buildRow(c, skuB, skuA, "金額方案", `$${big}`, big, desc));
+        // 主商品行（主商品原始貨號留空）
+        rows.push(buildRow(c, skuA, "", "金額方案", `$${small}`, small, desc));
+        // 規格行（主商品原始貨號指向 skuA）
+        rows.push(buildSpecRow(skuB, skuA, "金額方案", `$${big}`, big));
       } else {
         rows.push(buildRow(c, baseSku, "", "", "", c.amount, desc));
       }
