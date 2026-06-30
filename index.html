@@ -963,6 +963,11 @@ function LiveOrderSorter() {
       big = 1499;
       small = total - 1499;
     }
+    // 兩筆金額相同時（偶數總額），big+1、small-1，避免 iOPENMALL 規格名稱重複報錯
+    if (small === big && small > 0) {
+      big += 1;
+      small -= 1;
+    }
     return [small, big];
   }
   function exportIopenXLSX() {
