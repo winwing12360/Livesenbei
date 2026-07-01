@@ -66,6 +66,15 @@ function sizeOrder(s){
   const n=parseInt(s,10);if(!isNaN(n))return 100+n;
   return 9999;
 }
+function getGroupKey(it){
+  if(!it.size)return it.product+"|||"+(it.style||"");
+  return it.product+"|||"+[it.style,it.color].filter(Boolean).join("·");
+}
+function getGroupLabel(it){
+  if(!it.size)return it.style||it.color||it.product;
+  return [it.style,it.color].filter(Boolean).join(" ")||it.product;
+}
+function getSortSize(it){return sizeOrder(it.size||it.color);}
 function sortPri(it){if(it.allArrived)return 4;if(it.allOrdered)return 3;if(it.firstOrderDate)return 2;return 1;}
 const GROUP_LABEL={1:"📋 未開始訂貨",2:"🚚 訂貨中",3:"📦 全數訂完，待到貨",4:"✅ 已到貨"};
 function makeOrderKey(customerKey,items){return customerKey+"||"+items.map(it=>itemKey(it)+"x"+it.qty).sort().join("|");}
@@ -896,10 +905,9 @@ function App(){
 
   const displayed=items.filter(it=>{if(filter==="unordered")return!it.allArrived&&!it.firstOrderDate;if(filter==="ordered")return!it.allArrived&&!!it.firstOrderDate;if(filter==="arrived")return it.allArrived;return true;}).filter(it=>!search.trim()||it.product.includes(search.trim())).slice().sort((a,b)=>{
   const pd=sortPri(a)-sortPri(b);if(pd!==0)return pd;
-  const ap=[a.product,a.style,a.color].join("|||");
-  const bp=[b.product,b.style,b.color].join("|||");
-  const cd=ap.localeCompare(bp);if(cd!==0)return cd;
-  return sizeOrder(a.size)-sizeOrder(b.size);
+  const gka=getGroupKey(a),gkb=getGroupKey(b);
+  const cd=gka.localeCompare(gkb);if(cd!==0)return cd;
+  return getSortSize(a)-getSortSize(b);
 });
   const arrivedCount=items.filter(it=>it.allArrived).length;
   const late3Count=items.filter(isLateOrder).length;
@@ -1017,7 +1025,7 @@ function App(){
           {loading?(<div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>)
           :items.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}><div style={{fontSize:36,marginBottom:12}}>📦</div><div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div><div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的CSV</div></div>)
           :displayed.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>)
-          :(displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))
+          :(displayed.map((it,idx)=>{const prev=displayed[idx-1];const showStatus=idx===0||(prev&&sortPri(prev)!==sortPri(it));const showGroup=idx===0||(prev&&getGroupKey(prev)!==getGroupKey(it));return(<React.Fragment key={it.id}>{showStatus&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 12px",marginTop:idx===0?0:16}}>{GROUP_LABEL[sortPri(it)]}</div>}{showGroup&&<div style={{background:C.stripe,borderRadius:10,padding:"6px 12px",marginBottom:4,marginTop:showStatus?0:8}}><span style={{fontSize:14,fontWeight:700,color:C.ink}}>{getGroupLabel(it)}</span><span style={{fontSize:11,color:C.inkMuted,marginLeft:6}}>{it.product}</span></div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))
           }
         </div>
       )}
