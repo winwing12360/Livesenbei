@@ -1036,6 +1036,7 @@ function App(){
             );
           })()}
           {displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))}
+          </React.Fragment>)
         </div>
       )}
 
