@@ -874,7 +874,7 @@ function App(){
       if(!prodGroups[it.product])prodGroups[it.product]=[];
       prodGroups[it.product].push(it);
     });
-    return Object.keys(prodGroups).sort((a,b)=>a.localeCompare(b,"zh-Hant")).map(prod=>{
+    return Object.keys(prodGroups).sort((a,b)=>a.localeCompare(b)).map(prod=>{
       const its=prodGroups[prod];
       const hasSizeField=its.some(it=>it.size);
       const varGroups={};
@@ -885,7 +885,7 @@ function App(){
         varGroups[vk].sizes[sd]=(varGroups[vk].sizes[sd]||0)+it.qty;
       });
       const prodTotal=its.reduce((s,i)=>s+i.qty,0);
-      const variants=Object.keys(varGroups).sort((a,b)=>a.localeCompare(b,"zh-Hant")).map(vk=>{
+      const variants=Object.keys(varGroups).sort((a,b)=>a.localeCompare(b)).map(vk=>{
         const sg=varGroups[vk].sizes;
         const szKeys=Object.keys(sg).sort((a,b)=>sizeOrder(a)-sizeOrder(b));
         return{vk,szKeys,sg,total:szKeys.reduce((s,k)=>s+sg[k],0)};
@@ -898,7 +898,7 @@ function App(){
   const pd=sortPri(a)-sortPri(b);if(pd!==0)return pd;
   const ap=[a.product,a.style,a.color].join("|||");
   const bp=[b.product,b.style,b.color].join("|||");
-  const cd=ap.localeCompare(bp,"zh-Hant");if(cd!==0)return cd;
+  const cd=ap.localeCompare(bp);if(cd!==0)return cd;
   return sizeOrder(a.size)-sizeOrder(b.size);
 });
   const arrivedCount=items.filter(it=>it.allArrived).length;
@@ -1000,7 +1000,7 @@ function App(){
           {loading?(<div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>)
           :items.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}><div style={{fontSize:36,marginBottom:12}}>📦</div><div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div><div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的CSV</div></div>)
           :displayed.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>)
-          :(<React.Fragment>
+          :(<div>
           {/* ── 需求彙總 ── */}
           {summaryData.length>0&&(
             <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:14,padding:"12px 14px",marginBottom:14}}>
@@ -1026,7 +1026,7 @@ function App(){
             </div>
           )}
           {displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);})}
-          </React.Fragment>)
+          </div>)
         </div>
       )}
 
