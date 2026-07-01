@@ -867,6 +867,33 @@ function App(){
 
   if(setupMode)return<Setup onDone={(t,g,name)=>{setToken(t);const ws=[{name:name||"第一場次",gistId:g}];setWorkspaces(ws);setActiveIdx(0);saveWorkspaces(ws,0);localStorage.setItem("st_token",t);setSetupMode(false);gFetch(t,g).then(({items:its,savedAlloc:sa})=>{setItems(its);setSavedAlloc(sa);}).catch(e=>setGlobalErr(e.message));}}/>;
 
+  // 需求彙總資料（useMemo 預先計算）
+  const summaryData=useMemo(()=>{
+    const prodGroups={};
+    items.forEach(it=>{
+      if(!prodGroups[it.product])prodGroups[it.product]=[];
+      prodGroups[it.product].push(it);
+    });
+    return Object.keys(prodGroups).sort((a,b)=>a.localeCompare(b,"zh-Hant")).map(prod=>{
+      const its=prodGroups[prod];
+      const hasSizeField=its.some(it=>it.size);
+      const varGroups={};
+      its.forEach(it=>{
+        const vk=hasSizeField?[it.style,it.color].filter(Boolean).join(" "):(it.style||it.color||"");
+        const sd=hasSizeField?it.size:(it.color||"");
+        if(!varGroups[vk])varGroups[vk]={sizes:{}};
+        varGroups[vk].sizes[sd]=(varGroups[vk].sizes[sd]||0)+it.qty;
+      });
+      const prodTotal=its.reduce((s,i)=>s+i.qty,0);
+      const variants=Object.keys(varGroups).sort((a,b)=>a.localeCompare(b,"zh-Hant")).map(vk=>{
+        const sg=varGroups[vk].sizes;
+        const szKeys=Object.keys(sg).sort((a,b)=>sizeOrder(a)-sizeOrder(b));
+        return{vk,szKeys,sg,total:szKeys.reduce((s,k)=>s+sg[k],0)};
+      });
+      return{prod,prodTotal,variants};
+    });
+  },[items]);
+
   const displayed=items.filter(it=>{if(filter==="unordered")return!it.allArrived&&!it.firstOrderDate;if(filter==="ordered")return!it.allArrived&&!!it.firstOrderDate;if(filter==="arrived")return it.allArrived;return true;}).filter(it=>!search.trim()||it.product.includes(search.trim())).slice().sort((a,b)=>{
   const pd=sortPri(a)-sortPri(b);if(pd!==0)return pd;
   const ap=[a.product,a.style,a.color].join("|||");
@@ -975,67 +1002,30 @@ function App(){
           :displayed.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>)
           :(<React.Fragment>
           {/* ── 需求彙總 ── */}
-          {(()=>{
-            // 分組邏輯：依商品→款式/顏色，展示尺寸分佈
-            const prodGroups={};
-            items.forEach(it=>{
-              const prod=it.product;
-              if(!prodGroups[prod])prodGroups[prod]=[];
-              prodGroups[prod].push(it);
-            });
-            const prodKeys=Object.keys(prodGroups).sort((a,b)=>a.localeCompare(b,"zh-Hant"));
-            if(prodKeys.length===0)return null;
-
-            return(
-              <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:14,padding:"12px 14px",marginBottom:14}}>
-                <div style={{fontSize:12,fontWeight:700,color:C.inkMuted,marginBottom:10}}>📋 需求彙總</div>
-                {prodKeys.map(prod=>{
-                  const its=prodGroups[prod];
-                  // 判斷尺寸維度：size欄有值用size，否則用color（混搭優惠類型）
-                  const hasSizeField=its.some(it=>it.size);
-                  // 次分組 key：若有style用style；若style空用color；若都有則color+style
-                  const getVariantKey=it=>{
-                    if(!hasSizeField)return it.style||it.color||"";
-                    return [it.style,it.color].filter(Boolean).join(" ");
-                  };
-                  const getSizeDim=it=>hasSizeField?it.size:(it.color||"");
-                  const varGroups={};
-                  its.forEach(it=>{
-                    const vk=getVariantKey(it);
-                    if(!varGroups[vk])varGroups[vk]={sizes:{}};
-                    const sd=getSizeDim(it);
-                    varGroups[vk].sizes[sd]=(varGroups[vk].sizes[sd]||0)+it.qty;
-                  });
-                  const varKeys=Object.keys(varGroups).sort((a,b)=>a.localeCompare(b,"zh-Hant"));
-                  const prodTotal=its.reduce((s,i)=>s+i.qty,0);
-                  return(
-                    <div key={prod} style={{marginBottom:10}}>
-                      <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>
-                        {prod} <span style={{fontWeight:400}}>共{prodTotal}件</span>
-                      </div>
-                      {varKeys.map(vk=>{
-                        const sg=varGroups[vk].sizes;
-                        const szKeys=Object.keys(sg).sort((a,b)=>sizeOrder(a)-sizeOrder(b));
-                        const total=szKeys.reduce((s,k)=>s+sg[k],0);
-                        return(
-                          <div key={vk} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3}}>
-                            {vk&&<span style={{fontSize:12,fontWeight:600,color:C.ink,minWidth:80}}>{vk}</span>}
-                            {szKeys.map(sz=>(
-                              <span key={sz} style={{background:C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:C.ink}}>
-                                {sz}×{sg[sz]}
-                              </span>
-                            ))}
-                            <span style={{fontSize:11,color:C.inkMuted}}>共{total}件</span>
-                          </div>
-                        );
-                      })}
+          {summaryData.length>0&&(
+            <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:14,padding:"12px 14px",marginBottom:14}}>
+              <div style={{fontSize:12,fontWeight:700,color:C.inkMuted,marginBottom:10}}>📋 需求彙總</div>
+              {summaryData.map(({prod,prodTotal,variants})=>(
+                <div key={prod} style={{marginBottom:10}}>
+                  <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>
+                    {prod} <span style={{fontWeight:400}}>共{prodTotal}件</span>
+                  </div>
+                  {variants.map(({vk,szKeys,sg,total})=>(
+                    <div key={vk||"_"} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3}}>
+                      {vk&&<span style={{fontSize:12,fontWeight:600,color:C.ink,minWidth:80}}>{vk}</span>}
+                      {szKeys.map(sz=>(
+                        <span key={sz} style={{background:C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:C.ink}}>
+                          {sz}×{sg[sz]}
+                        </span>
+                      ))}
+                      <span style={{fontSize:11,color:C.inkMuted}}>共{total}件</span>
                     </div>
-                  );
-                })}
-              </div>
-            );
-          })()}
-          {displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))}
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          {displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);})}
           </React.Fragment>)
         </div>
       )}
