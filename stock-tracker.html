@@ -997,27 +997,16 @@ function App(){
               {batchSel.size>0&&<span style={{color:C.inkMuted,fontSize:12}}>— 在下方設定日期後按套用</span>}
             </div>
           )}
-          {loading?(<div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>)
-          :items.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}><div style={{fontSize:36,marginBottom:12}}>📦</div><div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div><div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的CSV</div></div>)
-          :displayed.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>)
-          :(<div>
-          {/* ── 需求彙總 ── */}
           {summaryData.length>0&&(
             <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:14,padding:"12px 14px",marginBottom:14}}>
               <div style={{fontSize:12,fontWeight:700,color:C.inkMuted,marginBottom:10}}>📋 需求彙總</div>
               {summaryData.map(({prod,prodTotal,variants})=>(
                 <div key={prod} style={{marginBottom:10}}>
-                  <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>
-                    {prod} <span style={{fontWeight:400}}>共{prodTotal}件</span>
-                  </div>
+                  <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>{prod} <span style={{fontWeight:400}}>共{prodTotal}件</span></div>
                   {variants.map(({vk,szKeys,sg,total})=>(
                     <div key={vk||"_"} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3}}>
                       {vk&&<span style={{fontSize:12,fontWeight:600,color:C.ink,minWidth:80}}>{vk}</span>}
-                      {szKeys.map(sz=>(
-                        <span key={sz} style={{background:C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:C.ink}}>
-                          {sz}×{sg[sz]}
-                        </span>
-                      ))}
+                      {szKeys.map(sz=>(<span key={sz} style={{background:C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:C.ink}}>{sz}×{sg[sz]}</span>))}
                       <span style={{fontSize:11,color:C.inkMuted}}>共{total}件</span>
                     </div>
                   ))}
@@ -1025,8 +1014,11 @@ function App(){
               ))}
             </div>
           )}
-          {displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);})}
-          </div>)
+          {loading?(<div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>)
+          :items.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}><div style={{fontSize:36,marginBottom:12}}>📦</div><div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div><div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的CSV</div></div>)
+          :displayed.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>)
+          :(displayed.map((it,idx)=>{const prev=displayed[idx-1];const showDivider=idx===0||(prev&&sortPri(prev)!==sortPri(it));return(<React.Fragment key={it.id}>{showDivider&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 8px",marginTop:idx===0?0:12}}>{GROUP_LABEL[sortPri(it)]}</div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))
+          }
         </div>
       )}
 
