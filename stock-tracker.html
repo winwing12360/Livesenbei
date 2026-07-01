@@ -66,12 +66,18 @@ function sizeOrder(s){
   const n=parseInt(s,10);if(!isNaN(n))return 100+n;
   return 9999;
 }
+// 去掉款式結尾的顏色詞，取得基底款式名（如「牛仔小個白」→「牛仔小個」）
+const COLOR_SUFFIXES=["深灰","灰綠","藏青","卡其","橘紅","白","黑","藍","灰","紅","粉","綠","橘","紫","棕"];
+function getBaseStyle(style){
+  for(const c of COLOR_SUFFIXES){if(style.endsWith(c))return style.slice(0,-c.length);}
+  return style;
+}
 function getGroupKey(it){
-  if(!it.size)return it.product+"|||"+(it.style||"");
+  if(!it.size)return it.product+"|||"+getBaseStyle(it.style||it.color||"");
   return it.product+"|||"+[it.style,it.color].filter(Boolean).join("·");
 }
 function getGroupLabel(it){
-  if(!it.size)return it.style||it.color||it.product;
+  if(!it.size)return getBaseStyle(it.style||it.color||"")||it.product;
   return [it.style,it.color].filter(Boolean).join(" ")||it.product;
 }
 function getSortSize(it){return sizeOrder(it.size||it.color);}
@@ -897,7 +903,10 @@ function App(){
       const variants=Object.keys(varGroups).sort((a,b)=>a.localeCompare(b)).map(vk=>{
         const sg=varGroups[vk].sizes;
         const szKeys=Object.keys(sg).sort((a,b)=>sizeOrder(a)-sizeOrder(b));
-        return{vk,szKeys,sg,total:szKeys.reduce((s,k)=>s+sg[k],0)};
+        // 判斷此款式是否全部已訂完
+        const grpItems=its.filter(it2=>{const v2=hasSizeField?[it2.style,it2.color].filter(Boolean).join(" "):(it2.style||it2.color||"");return v2===vk;});
+        const allOrdered=grpItems.length>0&&grpItems.every(it2=>it2.allOrdered);
+        return{vk,szKeys,sg,total:szKeys.reduce((s,k)=>s+sg[k],0),allOrdered};
       });
       return{prod,prodTotal,variants};
     });
@@ -1005,27 +1014,19 @@ function App(){
               {batchSel.size>0&&<span style={{color:C.inkMuted,fontSize:12}}>— 在下方設定日期後按套用</span>}
             </div>
           )}
-          {summaryData.length>0&&(
-            <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:14,padding:"12px 14px",marginBottom:14}}>
-              <div style={{fontSize:12,fontWeight:700,color:C.inkMuted,marginBottom:10}}>📋 需求彙總</div>
-              {summaryData.map(({prod,prodTotal,variants})=>(
-                <div key={prod} style={{marginBottom:10}}>
-                  <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>{prod} <span style={{fontWeight:400}}>共{prodTotal}件</span></div>
-                  {variants.map(({vk,szKeys,sg,total})=>(
-                    <div key={vk||"_"} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3}}>
-                      {vk&&<span style={{fontSize:12,fontWeight:600,color:C.ink,minWidth:80}}>{vk}</span>}
-                      {szKeys.map(sz=>(<span key={sz} style={{background:C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:C.ink}}>{sz}×{sg[sz]}</span>))}
-                      <span style={{fontSize:11,color:C.inkMuted}}>共{total}件</span>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          )}
+
           {loading?(<div style={{color:C.inkMuted,textAlign:"center",padding:"48px 0",fontSize:14}}>讀取中…</div>)
           :items.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"64px 16px"}}><div style={{fontSize:36,marginBottom:12}}>📦</div><div style={{fontSize:15,fontWeight:600,marginBottom:6}}>還沒有備貨資料</div><div style={{fontSize:13}}>點右上角「匯入備貨清單」上傳從理貨台匯出的CSV</div></div>)
           :displayed.length===0?(<div style={{color:C.inkMuted,border:`2px dashed ${C.line}`,borderRadius:16,textAlign:"center",padding:"40px 16px",fontSize:14}}>這個分類目前沒有資料</div>)
-          :(displayed.map((it,idx)=>{const prev=displayed[idx-1];const showStatus=idx===0||(prev&&sortPri(prev)!==sortPri(it));const showGroup=idx===0||(prev&&getGroupKey(prev)!==getGroupKey(it));return(<React.Fragment key={it.id}>{showStatus&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 12px",marginTop:idx===0?0:16}}>{GROUP_LABEL[sortPri(it)]}</div>}{showGroup&&<div style={{background:C.stripe,borderRadius:10,padding:"6px 12px",marginBottom:4,marginTop:showStatus?0:8}}><span style={{fontSize:14,fontWeight:700,color:C.ink}}>{getGroupLabel(it)}</span><span style={{fontSize:11,color:C.inkMuted,marginLeft:6}}>{it.product}</span></div>}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))
+          :(displayed.map((it,idx)=>{const prev=displayed[idx-1];const showStatus=idx===0||(prev&&sortPri(prev)!==sortPri(it));const showGroup=idx===0||(prev&&getGroupKey(prev)!==getGroupKey(it));return(<React.Fragment key={it.id}>{showStatus&&<div style={{color:C.inkMuted,fontSize:12,fontWeight:700,padding:"4px 2px 12px",marginTop:idx===0?0:16}}>{GROUP_LABEL[sortPri(it)]}</div>}{showGroup&&(()=>{
+  const groupKey=getGroupKey(it);
+  const groupTotal=displayed.filter(x=>getGroupKey(x)===groupKey).reduce((s,x)=>s+x.qty,0);
+  return <div style={{background:C.stripe,borderRadius:10,padding:"6px 12px",marginBottom:4,marginTop:showStatus?0:8}}>
+    <span style={{fontSize:14,fontWeight:700,color:C.ink}}>{getGroupLabel(it)}</span>
+    <span style={{fontSize:12,color:C.inkMuted,marginLeft:6}}>共{groupTotal}件</span>
+    {getGroupLabel(it)!==it.product&&<span style={{fontSize:10,color:C.inkMuted,marginLeft:6}}>{it.product}</span>}
+  </div>;
+})()}<ItemCard it={it} sel={batchSel.has(it.id)} onToggleSel={()=>setBatchSel(prev=>{const n=new Set(prev);n.has(it.id)?n.delete(it.id):n.add(it.id);return n;})} onUpdate={(field,value)=>updateField(it.id,field,value)}/></React.Fragment>);}))
           }
         </div>
       )}
@@ -1050,6 +1051,27 @@ function App(){
               <button onClick={()=>{setBatchSel(new Set());setBatchDate1("");setBatchDate2("");}} style={{background:"transparent",color:"rgba(255,255,255,0.5)",border:"none",padding:"4px",fontSize:13,cursor:"pointer",textAlign:"center"}}>取消選取</button>
             </div>
           </div>
+        </div>
+      )}
+      {/* 需求彙總（底部）*/}
+      {summaryData.length>0&&(
+        <div style={{background:C.surface,border:`1px solid ${C.line}`,borderRadius:14,padding:"14px 16px",margin:"16px 0"}}>
+          <div style={{fontSize:12,fontWeight:700,color:C.inkMuted,marginBottom:10}}>📋 需求彙總</div>
+          {summaryData.map(({prod,prodTotal,variants})=>(
+            <div key={prod} style={{marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>{prod} <span style={{fontWeight:400}}>共{prodTotal}件</span></div>
+              {variants.map(({vk,szKeys,sg,total,allOrdered})=>{
+                const isOrdered=allOrdered;
+                return(
+                  <div key={vk||"_"} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3,opacity:isOrdered?0.6:1}}>
+                    {vk&&<span style={{fontSize:12,fontWeight:600,color:isOrdered?C.success:C.ink,minWidth:80,textDecoration:isOrdered?"line-through":"none"}}>{vk}</span>}
+                    {szKeys.map(sz=>(<span key={sz} style={{background:isOrdered?"#d4edda":C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:isOrdered?C.success:C.ink}}>{sz}×{sg[sz]}</span>))}
+                    <span style={{fontSize:11,color:C.inkMuted}}>共{total}件</span>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
       {/* 置頂按鈕 */}
