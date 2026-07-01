@@ -905,8 +905,11 @@ function App(){
         const szKeys=Object.keys(sg).sort((a,b)=>sizeOrder(a)-sizeOrder(b));
         // 判斷此款式是否全部已訂完
         const grpItems=its.filter(it2=>{const v2=hasSizeField?[it2.style,it2.color].filter(Boolean).join(" "):(it2.style||it2.color||"");return v2===vk;});
-        const allOrdered=grpItems.length>0&&grpItems.every(it2=>it2.allOrdered);
-        return{vk,szKeys,sg,total:szKeys.reduce((s,k)=>s+sg[k],0),allOrdered};
+        // 全部有訂購日 = 已訂（綠色）；部分有訂購日 = 訂貨中（橘色）
+        const orderedCount=grpItems.filter(it2=>it2.firstOrderDate||it2.allOrdered).length;
+        const allOrdered=grpItems.length>0&&orderedCount===grpItems.length;
+        const anyOrdered=orderedCount>0;
+        return{vk,szKeys,sg,total:szKeys.reduce((s,k)=>s+sg[k],0),allOrdered,anyOrdered};
       });
       return{prod,prodTotal,variants};
     });
@@ -1060,12 +1063,13 @@ function App(){
           {summaryData.map(({prod,prodTotal,variants})=>(
             <div key={prod} style={{marginBottom:12}}>
               <div style={{fontSize:11,fontWeight:700,color:C.inkMuted,marginBottom:4}}>{prod} <span style={{fontWeight:400}}>共{prodTotal}件</span></div>
-              {variants.map(({vk,szKeys,sg,total,allOrdered})=>{
-                const isOrdered=allOrdered;
+              {variants.map(({vk,szKeys,sg,total,allOrdered,anyOrdered})=>{
+                const color=allOrdered?C.success:anyOrdered?C.orange:C.ink;
+                const bg=allOrdered?"#d4edda":anyOrdered?"#fff3e0":C.stripe;
                 return(
-                  <div key={vk||"_"} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3,opacity:isOrdered?0.6:1}}>
-                    {vk&&<span style={{fontSize:12,fontWeight:600,color:isOrdered?C.success:C.ink,minWidth:80,textDecoration:isOrdered?"line-through":"none"}}>{vk}</span>}
-                    {szKeys.map(sz=>(<span key={sz} style={{background:isOrdered?"#d4edda":C.stripe,borderRadius:12,padding:"2px 7px",fontSize:11,color:isOrdered?C.success:C.ink}}>{sz}×{sg[sz]}</span>))}
+                  <div key={vk||"_"} style={{display:"flex",flexWrap:"wrap",alignItems:"center",gap:4,marginBottom:3,opacity:allOrdered?0.5:1}}>
+                    {vk&&<span style={{fontSize:12,fontWeight:600,color,minWidth:80,textDecoration:allOrdered?"line-through":"none"}}>{vk}</span>}
+                    {szKeys.map(sz=>(<span key={sz} style={{background:bg,borderRadius:12,padding:"2px 7px",fontSize:11,color}}>{sz}×{sg[sz]}</span>))}
                     <span style={{fontSize:11,color:C.inkMuted}}>共{total}件</span>
                   </div>
                 );
